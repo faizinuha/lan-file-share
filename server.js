@@ -31,7 +31,18 @@ function getLanAddresses() {
  * @returns {string} absolute path
  */
 function resolveSafe({ path: relPath, root }) {
-  const normalizedRel = path.posix.normalize("/" + (relPath || "").replace(/\\/g, "/")).replace(/^\/+/, "");
+  const raw = (relPath || "").replace(/\\/g, "/");
+  // Reject any explicit traversal segment. This is a belt-and-suspenders
+  // check: we also clamp via path.resolve below, but rejecting here gives
+  // callers a clearer error rather than silently mapping outside input
+  // back into the root.
+  const parts = raw.split("/").filter(Boolean);
+  if (parts.some((p) => p === "..")) {
+    const err = new Error("Path traversal detected");
+    err.status = 400;
+    throw err;
+  }
+  const normalizedRel = path.posix.normalize("/" + raw).replace(/^\/+/, "");
   const absolute = path.resolve(root, normalizedRel);
   const rootResolved = path.resolve(root);
   if (absolute !== rootResolved && !absolute.startsWith(rootResolved + path.sep)) {
