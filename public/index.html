@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="LAN Share" />
+    <title>LAN File Share</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Register screen -->
+      <section id="register-screen" class="screen">
+        <div class="register-card">
+          <div class="logo" aria-hidden="true">
+            <svg viewBox="0 0 48 48" width="56" height="56">
+              <rect x="4" y="10" width="40" height="28" rx="4" fill="#3b82f6" />
+              <rect x="10" y="16" width="28" height="14" rx="2" fill="#0f172a" />
+              <circle cx="24" cy="34" r="2" fill="#0f172a" />
+            </svg>
+          </div>
+          <h1>LAN File Share</h1>
+          <p class="muted">
+            Masukin nama device ini buat mulai berbagi file di jaringan lokal.
+          </p>
+          <label for="device-name">Nama device</label>
+          <input
+            id="device-name"
+            type="text"
+            placeholder="Misal: HP-Faiz atau Laptop-Kerja"
+            autocomplete="off"
+            maxlength="40"
+          />
+          <div class="kind-row">
+            <label><input type="radio" name="kind" value="mobile" checked /> HP</label>
+            <label><input type="radio" name="kind" value="pc" /> PC / Laptop</label>
+          </div>
+          <button id="register-btn" class="primary">Masuk</button>
+          <p id="register-error" class="error hidden"></p>
+          <p class="hint muted">
+            Device ini dikenali oleh yang lain lewat nama di atas. Bebas diubah kapan aja.
+          </p>
+        </div>
+      </section>
+
+      <!-- Main app -->
+      <section id="main-screen" class="screen hidden">
+        <header class="topbar">
+          <div class="brand">
+            <span class="dot" id="status-dot"></span>
+            <strong>LAN File Share</strong>
+          </div>
+          <div class="topbar-info">
+            <span id="my-name" class="chip"></span>
+            <button id="show-qr" class="ghost" title="Tampilkan QR untuk HP">QR</button>
+            <button id="change-name" class="ghost" title="Ganti nama">Ganti nama</button>
+            <button id="pick-folder" class="ghost hidden" title="Ganti folder (hanya di Electron)">Pilih folder</button>
+          </div>
+        </header>
+
+        <main class="layout">
+          <aside class="sidebar">
+            <h2>Device online</h2>
+            <ul id="device-list" class="device-list"></ul>
+            <div class="sidebar-footer">
+              <small class="muted" id="server-ip"></small>
+            </div>
+          </aside>
+
+          <section class="content">
+            <div class="toolbar">
+              <nav class="breadcrumbs" id="breadcrumbs" aria-label="path"></nav>
+              <div class="toolbar-spacer"></div>
+              <input id="search" type="search" placeholder="Cari file..." />
+              <button id="btn-upload" class="primary">Upload</button>
+              <button id="btn-mkdir" class="ghost">Folder baru</button>
+            </div>
+            <input id="file-input" type="file" multiple hidden />
+
+            <div id="file-list" class="file-list"></div>
+            <div id="empty-state" class="empty hidden">
+              <p>Folder kosong.</p>
+              <p class="muted">Upload file buat mulai berbagi.</p>
+            </div>
+          </section>
+        </main>
+
+        <!-- QR modal -->
+        <div id="qr-modal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card">
+            <header>
+              <h3>Akses dari HP</h3>
+              <button class="close" data-close>&times;</button>
+            </header>
+            <div class="qr-body">
+              <img id="qr-img" alt="QR code" />
+              <p>Scan dari HP (harus di WiFi yang sama).</p>
+              <code id="qr-url"></code>
+              <p class="muted">
+                Di HP: buka link di Chrome / Safari &rarr; <em>Add to Home Screen</em> buat jadi aplikasi.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Preview modal -->
+        <div id="preview-modal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card large">
+            <header>
+              <h3 id="preview-name"></h3>
+              <button class="close" data-close>&times;</button>
+            </header>
+            <div class="preview-body" id="preview-body"></div>
+          </div>
+        </div>
+
+        <!-- Share modal -->
+        <div id="share-modal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card">
+            <header>
+              <h3>Share link</h3>
+              <button class="close" data-close>&times;</button>
+            </header>
+            <div class="share-body">
+              <p id="share-file" class="muted"></p>
+              <label>Berlaku selama
+                <select id="share-expiry">
+                  <option value="15">15 menit</option>
+                  <option value="60" selected>1 jam</option>
+                  <option value="1440">24 jam</option>
+                  <option value="10080">7 hari</option>
+                </select>
+              </label>
+              <button id="generate-share" class="primary">Buat link</button>
+              <div id="share-result" class="hidden">
+                <input id="share-url" readonly />
+                <button id="copy-share">Copy</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Confirm modal -->
+        <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card">
+            <header>
+              <h3 id="confirm-title">Konfirmasi</h3>
+              <button class="close" data-close>&times;</button>
+            </header>
+            <div class="confirm-body">
+              <p id="confirm-message"></p>
+              <div class="actions">
+                <button class="ghost" data-close>Batal</button>
+                <button id="confirm-ok" class="danger">OK</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Prompt modal -->
+        <div id="prompt-modal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card">
+            <header>
+              <h3 id="prompt-title">Input</h3>
+              <button class="close" data-close>&times;</button>
+            </header>
+            <div class="prompt-body">
+              <label id="prompt-label"></label>
+              <input id="prompt-input" type="text" />
+              <div class="actions">
+                <button class="ghost" data-close>Batal</button>
+                <button id="prompt-ok" class="primary">OK</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Toasts -->
+        <div id="toasts" class="toasts" aria-live="polite"></div>
+      </section>
+    </div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
