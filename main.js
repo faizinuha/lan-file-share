@@ -1,14 +1,25 @@
 "use strict";
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, shell } = require("electron");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const { spawn } = require("child_process");
 
 const { startServer } = require("./server");
 
 let mainWindow = null;
 let serverInfo = null;
+let tray = null;
+let quittingForReal = false;
+
+// Cloudflare Tunnel child state. A single tunnel at a time — starting again
+// tears down the previous child first so we never leak processes.
+const tunnelState = {
+  proc: null,
+  url: null,
+  starting: false,
+};
 
 // electron-updater is optional at dev time (not bundled with the repo
 // installer), so we require it lazily and fall back to no-op when missing.
@@ -141,6 +152,15 @@ function createWindow() {
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
+  mainWindow.on("close", (e) => {
+    // When a tray is active the first close hides the window instead of
+    // killing the app — keeps foreground uploads/tunnel alive. User can
+    // "Keluar" from the tray menu for a real quit.
+    if (!quittingForReal && tray) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -211,10 +231,223 @@ ipcMain.handle("install-update", async () => {
   return { supported: true };
 });
 
+// --- Cloudflare Tunnel child process management ---------------------------
+// `cloudflared tunnel --url http://localhost:<port>` spawns a quick tunnel
+// and prints a `https://<random>.trycloudflare.com` URL to stderr once the
+// connection is up. We parse that line, remember it, and surface it to the
+// renderer so the UI can show a QR for the HP. Output of stdout/stderr after
+// the URL is captured is discarded.
+
+function sendTunnelEvent(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send("tunnel-event", payload); } catch (_err) { /* ignore */ }
+}
+
+function cloudflaredBinary() {
+  if (process.env.CLOUDFLARED_PATH) return process.env.CLOUDFLARED_PATH;
+  return process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
+}
+
+function killTunnel() {
+  if (!tunnelState.proc) return;
+  try {
+    if (process.platform === "win32") {
+      // cloudflared on Windows handles Ctrl+C cleanly via SIGTERM equiv.
+      tunnelState.proc.kill();
+    } else {
+      tunnelState.proc.kill("SIGTERM");
+    }
+  } catch (_err) { /* ignore */ }
+  tunnelState.proc = null;
+  tunnelState.url = null;
+  tunnelState.starting = false;
+}
+
+async function startTunnel() {
+  if (tunnelState.starting) {
+    return { ok: false, error: "Tunnel sedang dimulai, tunggu sebentar." };
+  }
+  if (tunnelState.proc && tunnelState.url) {
+    return { ok: true, url: tunnelState.url, reused: true };
+  }
+  if (tunnelState.proc) {
+    // A process is alive but we don't have a URL yet — assume it's stuck,
+    // clean up and retry fresh.
+    killTunnel();
+  }
+  if (!serverInfo) {
+    return { ok: false, error: "Server belum siap" };
+  }
+
+  tunnelState.starting = true;
+
+  let proc;
+  try {
+    proc = spawn(cloudflaredBinary(), [
+      "tunnel",
+      "--url",
+      `http://localhost:${serverInfo.port}`,
+      "--no-autoupdate",
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    tunnelState.starting = false;
+    return { ok: false, error: `cloudflared gagal dijalankan: ${err && err.message ? err.message : String(err)}` };
+  }
+
+  tunnelState.proc = proc;
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      tunnelState.starting = false;
+      resolve(payload);
+    };
+
+    const urlRe = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
+    const handleChunk = (chunk) => {
+      const text = chunk.toString();
+      if (tunnelState.url) return;
+      const m = text.match(urlRe);
+      if (m) {
+        tunnelState.url = m[0];
+        sendTunnelEvent({ type: "ready", url: tunnelState.url });
+        finish({ ok: true, url: tunnelState.url });
+      }
+    };
+
+    proc.stdout.on("data", handleChunk);
+    proc.stderr.on("data", handleChunk);
+
+    proc.on("error", (err) => {
+      killTunnel();
+      const hint = err && err.code === "ENOENT"
+        ? "cloudflared nggak ketemu di PATH. Install dulu dari https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+        : (err && err.message ? err.message : String(err));
+      finish({ ok: false, error: hint });
+    });
+
+    proc.on("exit", (code) => {
+      const url = tunnelState.url;
+      tunnelState.proc = null;
+      tunnelState.url = null;
+      tunnelState.starting = false;
+      sendTunnelEvent({ type: "exit", code, url });
+      if (!settled) {
+        finish({ ok: false, error: `cloudflared keluar (code ${code}) sebelum URL muncul` });
+      }
+    });
+
+    // Guard rail: if no URL is seen in 45s, abort.
+    setTimeout(() => {
+      if (!tunnelState.url) {
+        killTunnel();
+        finish({ ok: false, error: "Timeout: cloudflared nggak kasih URL dalam 45 detik" });
+      }
+    }, 45_000);
+  });
+}
+
+ipcMain.handle("start-tunnel", () => startTunnel());
+ipcMain.handle("stop-tunnel", async () => { killTunnel(); return { ok: true }; });
+ipcMain.handle("get-tunnel-status", async () => ({
+  running: !!(tunnelState.proc && tunnelState.url),
+  url: tunnelState.url,
+}));
+
+// --- System tray ---------------------------------------------------------
+// Keeps the app quickly reachable after the user closes the window — a
+// common request so foreground uploads keep running.
+
+function trayIcon() {
+  // Fall back to a 1x1 empty image if the PNG isn't present yet (e.g. in a
+  // fresh checkout before `npm run generate-icons`). Electron still renders
+  // a placeholder in the tray so the menu works.
+  const p = path.join(__dirname, "public", "icons", "icon-192.png");
+  if (fs.existsSync(p)) {
+    const img = nativeImage.createFromPath(p);
+    // 16px for Windows/Linux, 18px for macOS template.
+    return img.resize({ width: process.platform === "darwin" ? 18 : 16 });
+  }
+  return nativeImage.createEmpty();
+}
+
+function openSharedRoot() {
+  if (serverInfo && serverInfo.sharedRoot) {
+    shell.openPath(serverInfo.sharedRoot).catch(() => { /* ignore */ });
+  }
+}
+
+function toggleWindow() {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isVisible()) {
+    mainWindow.hide();
+  } else {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+function buildTrayMenu() {
+  return Menu.buildFromTemplate([
+    { label: "Tampilkan aplikasi", click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else createWindow(); } },
+    { label: "Buka folder shared", click: openSharedRoot },
+    { type: "separator" },
+    {
+      label: tunnelState.url ? `Tunnel: ${tunnelState.url}` : "Install ke HP (tunnel)",
+      click: () => {
+        if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+        if (mainWindow) mainWindow.webContents.send("tunnel-event", { type: "open-modal" });
+      },
+    },
+    {
+      label: "Cek update",
+      click: () => {
+        if (!autoUpdater) return;
+        autoUpdater.checkForUpdates().catch(() => { /* ignore */ });
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Keluar",
+      click: () => {
+        quittingForReal = true;
+        app.quit();
+      },
+    },
+  ]);
+}
+
+function setupTray() {
+  try {
+    tray = new Tray(trayIcon());
+    tray.setToolTip("LAN File Share");
+    tray.setContextMenu(buildTrayMenu());
+    tray.on("click", () => {
+      if (process.platform !== "darwin") toggleWindow();
+    });
+    tray.on("double-click", toggleWindow);
+  } catch (err) {
+    // Trays are unsupported on some Linux configurations (e.g. Wayland
+    // without status-notifier support) — fall back to window-only mode.
+    console.error("Tray setup failed:", err);
+    tray = null;
+  }
+}
+
+function refreshTrayMenu() {
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
 app.whenReady().then(async () => {
   try {
     await bootstrap();
     createWindow();
+    setupTray();
     wireAutoUpdater();
     // Silent check ~5s after window is up. The UI receives events via IPC
     // and shows a toast + modal only if an update is actually available.
@@ -233,6 +466,17 @@ app.whenReady().then(async () => {
   });
 });
 
+// Keep tunnel label fresh in the tray context menu.
+setInterval(() => refreshTrayMenu(), 10_000).unref();
+
+app.on("before-quit", () => {
+  quittingForReal = true;
+  killTunnel();
+});
+
 app.on("window-all-closed", () => {
+  // With a tray active we intentionally keep the app running on all
+  // platforms until the user picks "Keluar" from the tray.
+  if (tray) return;
   if (process.platform !== "darwin") app.quit();
 });

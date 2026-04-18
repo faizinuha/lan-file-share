@@ -86,11 +86,15 @@ function request(method, urlPath, body, extraHeaders) {
 }
 
 function multipartUpload(urlPath, filename, content) {
+  return multipartUploadField(urlPath, "files", filename, content);
+}
+
+function multipartUploadField(urlPath, fieldName, filename, content) {
   return new Promise((resolve, reject) => {
     const boundary = "----lfsboundary" + Date.now();
     const head = Buffer.from(
       `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="files"; filename="${filename}"\r\n` +
+        `Content-Disposition: form-data; name="${fieldName}"; filename="${filename}"\r\n` +
         `Content-Type: application/octet-stream\r\n\r\n`,
       "utf8"
     );
@@ -115,7 +119,7 @@ function multipartUpload(urlPath, filename, content) {
         try {
           parsed = data ? JSON.parse(data) : null;
         } catch (_err) { parsed = { raw: data }; }
-        resolve({ status: res.statusCode, body: parsed });
+        resolve({ status: res.statusCode, body: parsed, raw: data, headers: res.headers });
       });
     });
     req.on("error", reject);
@@ -183,6 +187,35 @@ async function main() {
 
     const traversal = await request("GET", "/api/files?path=..%2F..%2Fetc");
     check("path traversal is blocked", traversal.status === 400);
+
+    // Device deletion flow: user can kick a peer off the online list.
+    const reg2 = await request("POST", "/api/devices/register", { name: "HP-temporary", kind: "mobile" });
+    const tempId = reg2.body && reg2.body.device && reg2.body.device.id;
+    check("register temp device for delete test", !!tempId);
+    const kick = await request("DELETE", `/api/devices/${encodeURIComponent(tempId)}`);
+    check("DELETE /api/devices/:id removes device", kick.status === 200);
+    const afterKick = await request("GET", "/api/devices");
+    check("kicked device disappears from list",
+      afterKick.status === 200 && !afterKick.body.devices.some((d) => d.id === tempId));
+
+    // Host device must be protected from deletion.
+    const host = (await request("GET", "/api/status")).body.host;
+    const kickHost = await request("DELETE", `/api/devices/${encodeURIComponent(host.id)}`);
+    check("DELETE host returns 400", kickHost.status === 400);
+
+    // Web Share Target receiver — multipart POST to /share-target must land
+    // files in <root>/Shared-from-Phone/ and redirect with ?shared=N.
+    const shared = await multipartUploadField(
+      "/share-target",
+      "media",
+      "shared.txt",
+      "from phone share sheet\n",
+    );
+    check("POST /share-target accepts file (303)", shared.status === 303);
+    check("POST /share-target redirects to /?shared=", /\/\?shared=/.test(shared.headers.location || ""));
+    const sharedList = await request("GET", "/api/files?path=Shared-from-Phone");
+    check("Shared-from-Phone folder contains the shared file",
+      sharedList.status === 200 && sharedList.body.entries.some((e) => /shared\.txt$/.test(e.name)));
 
     // WebDAV smoke tests
     const davOptions = await request("OPTIONS", "/webdav/");

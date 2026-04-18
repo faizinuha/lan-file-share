@@ -109,6 +109,8 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1p
   gap: 8px;
 }
 .device-list li.me { outline: 2px solid var(--accent); }
+.device-list li.host { border-color: var(--ok); }
+.device-list .dev-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .device-list .kind {
   font-size: 11px;
   text-transform: uppercase;
@@ -117,7 +119,65 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1p
   background: var(--panel-alt);
   color: var(--muted);
 }
+.device-list .kick-btn {
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+.device-list .kick-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.08);
+}
 .sidebar-footer { margin-top: auto; padding-top: 12px; }
+
+/* HTTP install hint banner for HP users. */
+.install-hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin: 10px 16px 0;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.install-hint-icon { font-size: 20px; flex-shrink: 0; }
+.install-hint-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.install-hint-text strong { font-size: 13px; }
+.install-hint-text span { color: var(--muted); font-size: 12px; }
+.install-hint .ghost.small { padding: 2px 8px; font-size: 16px; line-height: 1; }
+
+/* Cloudflare Tunnel / install-HP modal. */
+.install-hp-body { padding: 16px; }
+.install-hp-body .spinner {
+  width: 28px; height: 28px; margin: 10px auto;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.install-hp-body .tunnel-url {
+  display: block;
+  padding: 8px 10px;
+  background: var(--bg-alt);
+  border-radius: 6px;
+  margin: 8px 0;
+  font-size: 12px;
+  word-break: break-all;
+}
+#tunnel-qr {
+  display: block;
+  max-width: 220px;
+  margin: 8px auto;
+  background: #fff;
+  padding: 6px;
+  border-radius: 8px;
+}
 
 .content {
   padding: 16px;
