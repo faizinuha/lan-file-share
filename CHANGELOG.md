@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.0 — 2026-04-18
+
+### Features
+- shared folder with uploader metadata (no more per-device folders) (3efa576)
+
+### Bug Fixes
+- **review**: add per-directory mutex to meta read-modify-write (6893c11)
+- **review**: search results get uploader metadata; doSearch updates state.entries (1a051a7)
+
 ## v0.5.0 — 2026-04-18
 
 ### Features
