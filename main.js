@@ -21,6 +21,28 @@ try {
   autoUpdater = null;
 }
 
+// Compare two semver-like strings. Returns 1 if a > b, -1 if a < b, 0 if
+// equal. Only the numeric release-tuple is compared; pre-release tags
+// ("-beta.1" etc.) are ignored, which is fine for our "is there a newer
+// published release?" check.
+function compareVersions(a, b) {
+  const parse = (v) => String(v || "0")
+    .replace(/^v/i, "")
+    .split("-")[0]
+    .split(".")
+    .map((n) => parseInt(n, 10) || 0);
+  const av = parse(a);
+  const bv = parse(b);
+  const len = Math.max(av.length, bv.length);
+  for (let i = 0; i < len; i++) {
+    const x = av[i] || 0;
+    const y = bv[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
+}
+
 function sendUpdateEvent(payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
@@ -154,13 +176,18 @@ ipcMain.handle("check-for-update", async () => {
   }
   try {
     const result = await autoUpdater.checkForUpdates();
+    const currentVersion = app.getVersion();
+    const latestVersion = result && result.updateInfo && result.updateInfo.version;
+    // electron-updater's checkForUpdates() always reports updateInfo.version
+    // as the latest *published* release, even when the running app is on a
+    // newer dev build. Use semver comparison so we never show an update
+    // notification for a downgrade.
+    const hasUpdate = !!latestVersion && compareVersions(latestVersion, currentVersion) > 0;
     return {
       supported: true,
-      currentVersion: app.getVersion(),
-      latestVersion: result && result.updateInfo && result.updateInfo.version,
-      hasUpdate:
-        !!(result && result.updateInfo && result.updateInfo.version) &&
-        result.updateInfo.version !== app.getVersion(),
+      currentVersion,
+      latestVersion,
+      hasUpdate,
     };
   } catch (err) {
     return { supported: true, error: err && err.message ? err.message : String(err) };
