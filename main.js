@@ -301,7 +301,11 @@ async function startTunnel() {
     const finish = (payload) => {
       if (settled) return;
       settled = true;
-      tunnelState.starting = false;
+      // Only clear the `starting` flag if this closure still owns the
+      // active process. A stale proc1 calling finish() after proc2 has
+      // taken over would otherwise flip starting=false and mislead any
+      // in-flight startTunnel() call about proc2's state.
+      if (tunnelState.proc === proc) tunnelState.starting = false;
       resolve(payload);
     };
 
