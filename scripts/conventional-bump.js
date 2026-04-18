@@ -137,16 +137,38 @@ function main() {
   const root = path.resolve(__dirname, "..");
   const pkgPath = path.join(root, "package.json");
   const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-  const currentVersion = pkg.version;
-  const parsedCurrent = parseSemver(currentVersion);
+  const pkgVersion = pkg.version;
+
+  // Find the highest v* tag by semver, not the most-recent-by-commit.
+  // `git describe --abbrev=0` breaks when two tags point to the same
+  // commit (e.g. v0.3.0 and v0.4.0 both on the same merge commit): it
+  // returns the lexicographically-smaller one and the bump then tries to
+  // recreate an already-existing tag.
+  //
+  // `for-each-ref --sort=-version:refname` uses git's built-in version
+  // sorter, so "v0.10.0" > "v0.9.0" > "v0.4.0" > "v0.3.0" as expected.
+  // Falls back to empty (full history scan) if no v* tags exist yet.
+  const lastTag = shSafe(
+    "git for-each-ref --sort=-version:refname --count=1 --format=\"%(refname:short)\" \"refs/tags/v*\""
+  );
+
+  // Bump off the latest tag, not package.json. Previously we bumped
+  // package.json's recorded version, which could collide with an already-
+  // published tag if package.json lagged behind (e.g. the bot's earlier
+  // `chore(release)` commits never landed on main but tags did). Using the
+  // tag as the baseline guarantees the computed next version is unique
+  // against the tag namespace. Falls back to package.json if no v* tag
+  // exists yet (first release).
+  const parsedTag = parseSemver(lastTag);
+  const parsedPkg = parseSemver(pkgVersion);
+  const parsedCurrent = parsedTag || parsedPkg;
+  const currentVersion = parsedTag ? formatSemver(parsedTag) : pkgVersion;
+
   if (!parsedCurrent) {
-    process.stderr.write(`[conventional-bump] package.json version "${currentVersion}" is not a clean semver; bailing.\n`);
+    process.stderr.write(`[conventional-bump] neither tag ("${lastTag}") nor package.json ("${pkgVersion}") is a clean semver; bailing.\n`);
     process.exit(0);
   }
 
-  // Find the most recent v* tag reachable from HEAD. If no tag exists yet
-  // we fall back to scanning the full history.
-  const lastTag = shSafe("git describe --tags --abbrev=0 --match \"v*\"");
   const commits = getCommitsSince(lastTag);
 
   if (commits.length === 0) {

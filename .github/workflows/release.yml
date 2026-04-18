@@ -97,9 +97,20 @@ jobs:
               major|minor|patch) ;;
               *) echo "Invalid force_bump: $FORCE_BUMP" >&2; exit 1 ;;
             esac
-            current=$(node -p "require('./package.json').version")
-            next=$(node -e "
-              const v = require('./package.json').version.split('.').map(Number);
+            # Match the auto-bump baseline: use the highest v* tag (by
+            # git's version sorter, so v0.10.0 > v0.9.0) and only fall
+            # back to package.json if no v* tags exist yet. Bumping off
+            # package.json alone would regress when package.json lags
+            # behind published tags (e.g. pkg=0.4.0 but v1.0.0 is tagged
+            # -> force patch would compute v0.4.1 < v1.0.0).
+            last_tag=$(git for-each-ref --sort=-version:refname --count=1 --format="%(refname:short)" "refs/tags/v*" || true)
+            if [ -n "$last_tag" ]; then
+              current="${last_tag#v}"
+            else
+              current=$(node -p "require('./package.json').version")
+            fi
+            next=$(CURRENT="$current" node -e "
+              const v = process.env.CURRENT.split('.').map(Number);
               const kind = process.env.FORCE_BUMP;
               if (kind==='major'){v[0]+=1;v[1]=0;v[2]=0;}
               else if (kind==='minor'){v[1]+=1;v[2]=0;}
@@ -111,7 +122,7 @@ jobs:
               echo "current_version=$current"
               echo "new_version=$next"
               echo "notes<<EOF"
-              echo "Manually triggered $FORCE_BUMP release."
+              echo "Manually triggered $FORCE_BUMP release (baseline: ${last_tag:-package.json $current})."
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           else
@@ -146,6 +157,21 @@ jobs:
               inserted=0 CHANGELOG.md
           } > "$tmp"
           mv "$tmp" CHANGELOG.md
+
+      - name: Abort if tag already exists
+        if: steps.resolve.outputs.new_version == '' && steps.bump.outputs.new_version != ''
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          # Belt-and-suspenders: conventional-bump.js now bumps off the
+          # highest v* tag, not package.json, so collisions *shouldn't*
+          # happen. If one does (e.g. a tag was pushed manually between
+          # the bump-compute step and this one), fail loudly instead of
+          # silently skipping so the operator can resolve it.
+          if git ls-remote --exit-code --tags origin "v${NEW_VERSION}" >/dev/null 2>&1; then
+            echo "::error::Tag v${NEW_VERSION} already exists on origin. Aborting release." >&2
+            exit 1
+          fi
 
       - name: Commit, tag, push
         if: steps.resolve.outputs.new_version == '' && steps.bump.outputs.new_version != ''
@@ -192,9 +218,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Pull the tagged commit so package.json has the new version.
-          ref: v${{ needs.bump.outputs.new_version }}
-          fetch-depth: 0
-          fetch-tags: true
+          # Use the fully-qualified refs/tags/... form to avoid ambiguity
+          # with branches of the same name, and drop fetch-tags since the
+          # ref-specific fetch resolves the single tag we actually need.
+          ref: refs/tags/v${{ needs.bump.outputs.new_version }}
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -238,7 +265,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: v${{ needs.bump.outputs.new_version }}
+          ref: refs/tags/v${{ needs.bump.outputs.new_version }}
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
