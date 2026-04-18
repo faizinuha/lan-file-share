@@ -61,6 +61,7 @@
             <button id="show-qr" class="ghost" title="Tampilkan QR untuk HP">QR</button>
             <button id="change-name" class="ghost" title="Ganti nama">Ganti nama</button>
             <button id="pick-folder" class="ghost hidden" title="Ganti folder (hanya di Electron)">Pilih folder</button>
+            <button id="check-update" class="ghost hidden" title="Cek update (hanya di Electron)">Cek update</button>
           </div>
         </header>
 
@@ -78,10 +79,19 @@
               <nav class="breadcrumbs" id="breadcrumbs" aria-label="path"></nav>
               <div class="toolbar-spacer"></div>
               <input id="search" type="search" placeholder="Cari file..." />
+              <label class="toggle-inline" title="Kecilkan foto sebelum upload biar HP low-memory nggak gagal">
+                <input id="toggle-resize" type="checkbox" checked />
+                <span>Auto-resize foto</span>
+              </label>
               <button id="btn-upload" class="primary">Upload</button>
               <button id="btn-mkdir" class="ghost">Folder baru</button>
             </div>
             <input id="file-input" type="file" multiple hidden />
+
+            <div id="upload-panel" class="upload-panel hidden" aria-live="polite">
+              <h3>Upload berlangsung</h3>
+              <div id="upload-list"></div>
+            </div>
 
             <div id="file-list" class="file-list"></div>
             <div id="empty-state" class="empty hidden">
@@ -176,6 +186,26 @@
               <div class="actions">
                 <button class="ghost" data-close>Batal</button>
                 <button id="prompt-ok" class="primary">OK</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Update modal -->
+        <div id="update-modal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card">
+            <header>
+              <h3>Update tersedia</h3>
+              <button class="close" data-close>&times;</button>
+            </header>
+            <div class="update-body">
+              <p>Versi baru: <strong id="update-version"></strong></p>
+              <p id="update-status" class="muted">Siap download.</p>
+              <div id="update-progress" class="upload-bar hidden"><div id="update-progress-fill" class="upload-fill"></div></div>
+              <div class="actions">
+                <button class="ghost" data-close>Nanti aja</button>
+                <button id="update-download" class="primary">Download</button>
+                <button id="update-install" class="primary hidden">Install & restart</button>
               </div>
             </div>
           </div>

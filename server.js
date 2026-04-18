@@ -13,6 +13,7 @@ const { WebSocketServer } = require("ws");
 const QRCode = require("qrcode");
 const { nanoid } = require("nanoid");
 const { createWebdavHandler } = require("./webdav");
+const { createChunkUploadHandler } = require("./upload-chunks");
 
 function getLanAddresses() {
   const interfaces = os.networkInterfaces();
@@ -363,6 +364,25 @@ async function startServer(options) {
     broadcastEvent({ type: "files-changed", path: String(req.query.path || "") });
     res.json({ uploaded });
   });
+
+  // Chunked upload endpoint (for low-memory phones and huge files). Each
+  // chunk is streamed straight to disk so the browser never holds the full
+  // file in RAM and partial uploads can be retried individually.
+  //
+  // IMPORTANT: no body parser before this — the handler pipes the raw
+  // request into a WriteStream. The global `express.json()` parser above
+  // only activates for Content-Type: application/json, so binary uploads
+  // pass through untouched.
+  app.post(
+    "/api/files/upload-chunk",
+    createChunkUploadHandler({
+      sharedRoot,
+      resolveSafe,
+      onComplete: ({ dirRel }) => {
+        broadcastEvent({ type: "files-changed", path: dirRel || "" });
+      },
+    }),
+  );
 
   app.post("/api/files/mkdir", async (req, res, next) => {
     try {

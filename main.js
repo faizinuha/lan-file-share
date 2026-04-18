@@ -10,6 +10,48 @@ const { startServer } = require("./server");
 let mainWindow = null;
 let serverInfo = null;
 
+// electron-updater is optional at dev time (not bundled with the repo
+// installer), so we require it lazily and fall back to no-op when missing.
+let autoUpdater = null;
+try {
+  autoUpdater = require("electron-updater").autoUpdater;
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+} catch (_err) {
+  autoUpdater = null;
+}
+
+function sendUpdateEvent(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send("update-event", payload);
+  } catch (_err) {
+    /* window gone */
+  }
+}
+
+function wireAutoUpdater() {
+  if (!autoUpdater) return;
+  autoUpdater.on("checking-for-update", () => {
+    sendUpdateEvent({ type: "checking" });
+  });
+  autoUpdater.on("update-available", (info) => {
+    sendUpdateEvent({ type: "available", version: info && info.version, notes: info && info.releaseNotes });
+  });
+  autoUpdater.on("update-not-available", (info) => {
+    sendUpdateEvent({ type: "not-available", version: info && info.version });
+  });
+  autoUpdater.on("error", (err) => {
+    sendUpdateEvent({ type: "error", message: err && err.message ? err.message : String(err) });
+  });
+  autoUpdater.on("download-progress", (p) => {
+    sendUpdateEvent({ type: "progress", percent: p.percent, bytesPerSecond: p.bytesPerSecond, transferred: p.transferred, total: p.total });
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    sendUpdateEvent({ type: "downloaded", version: info && info.version });
+  });
+}
+
 const configPath = path.join(app.getPath("userData"), "config.json");
 
 function loadConfig() {
@@ -106,10 +148,54 @@ ipcMain.handle("get-server-info", async () => {
   return serverInfo ? serverInfo.publicInfo() : null;
 });
 
+ipcMain.handle("check-for-update", async () => {
+  if (!autoUpdater) {
+    return { supported: false, reason: "electron-updater not available (dev build?)" };
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return {
+      supported: true,
+      currentVersion: app.getVersion(),
+      latestVersion: result && result.updateInfo && result.updateInfo.version,
+      hasUpdate:
+        !!(result && result.updateInfo && result.updateInfo.version) &&
+        result.updateInfo.version !== app.getVersion(),
+    };
+  } catch (err) {
+    return { supported: true, error: err && err.message ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle("download-update", async () => {
+  if (!autoUpdater) return { supported: false };
+  try {
+    await autoUpdater.downloadUpdate();
+    return { supported: true, started: true };
+  } catch (err) {
+    return { supported: true, error: err && err.message ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle("install-update", async () => {
+  if (!autoUpdater) return { supported: false };
+  // Quit and install. The app will restart automatically.
+  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  return { supported: true };
+});
+
 app.whenReady().then(async () => {
   try {
     await bootstrap();
     createWindow();
+    wireAutoUpdater();
+    // Silent check ~5s after window is up. The UI receives events via IPC
+    // and shows a toast + modal only if an update is actually available.
+    if (autoUpdater && app.isPackaged) {
+      setTimeout(() => {
+        autoUpdater.checkForUpdates().catch(() => { /* ignore */ });
+      }, 5000);
+    }
   } catch (err) {
     dialog.showErrorBox("Gagal memulai server", String(err && err.stack ? err.stack : err));
     app.quit();

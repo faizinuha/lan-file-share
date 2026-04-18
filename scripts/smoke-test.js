@@ -209,6 +209,42 @@ async function main() {
 
     const davDelete = await rawRequest("DELETE", "/webdav/uploads/dav-moved.txt", "", "application/xml");
     check("WebDAV DELETE removes file", davDelete.status === 204);
+
+    // Chunked upload endpoint (low-memory phone fix).
+    const sid = "chunksmoke" + Date.now().toString(36);
+    const chunk0 = Buffer.from("HELLO-CHUNK-0|");
+    const chunk1 = Buffer.from("HELLO-CHUNK-1|");
+    const chunk2 = Buffer.from("END");
+    const expected = Buffer.concat([chunk0, chunk1, chunk2]).toString("utf8");
+
+    const mkChunkUrl = (idx) =>
+      `/api/files/upload-chunk?sessionId=${sid}&chunkIndex=${idx}&totalChunks=3` +
+      `&fileName=chunked.bin&targetPath=uploads`;
+
+    const c0 = await rawRequest("POST", mkChunkUrl(0), chunk0, "application/octet-stream");
+    check("POST /api/files/upload-chunk 0/3 accepted", c0.status === 200);
+    const c1 = await rawRequest("POST", mkChunkUrl(1), chunk1, "application/octet-stream");
+    check("POST /api/files/upload-chunk 1/3 accepted", c1.status === 200);
+    const c2 = await rawRequest("POST", mkChunkUrl(2), chunk2, "application/octet-stream");
+    check(
+      "POST /api/files/upload-chunk 2/3 assembles file",
+      c2.status === 200 && /"assembled":true/.test(c2.raw || "")
+    );
+
+    const chunkGet = await request("GET", "/api/files/download?path=uploads/chunked.bin");
+    check(
+      "chunked file reassembles identically",
+      chunkGet.status === 200 && chunkGet.raw === expected
+    );
+
+    // Path traversal through chunked endpoint must be blocked.
+    const badChunk = await rawRequest(
+      "POST",
+      `/api/files/upload-chunk?sessionId=bad&chunkIndex=0&totalChunks=1&fileName=x.txt&targetPath=..%2F..%2Fetc`,
+      "x",
+      "application/octet-stream"
+    );
+    check("chunked upload rejects path traversal", badChunk.status >= 400);
   } finally {
     await server.close();
     try {

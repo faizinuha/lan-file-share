@@ -54,6 +54,9 @@ Kedua sisi identik: sama-sama bisa lihat file device lain dan upload ke device m
 - **PWA** — HP bisa "Add to Home Screen" sebagai aplikasi standalone. Offline shell.
 - **Proteksi path traversal** — semua akses file dibatasi di `sharedRoot`.
 - **WebDAV** di `/webdav` — mount folder shared sebagai drive network di Windows Explorer, macOS Finder, iOS Files, atau file manager Android. File muncul langsung di file explorer native tanpa buka aplikasi.
+- **Auto-update** (Electron) — cek GitHub Releases otomatis pas startup + tombol manual "Cek update". Notifikasi in-app + download + install + restart, semua dari dalam aplikasi. Lihat [Auto-update](#auto-update-electron).
+- **Upload tahan banting untuk HP low-memory** — foto otomatis di-resize client-side (max 2048px / JPEG 85%) sebelum upload, file besar (>8 MB) dipecah jadi chunk 4 MB streaming (memori HP tetep kecil), tiap chunk di-retry 3x dengan exponential backoff kalau WiFi drop. Lihat [Upload dari HP](#upload-dari-hp-anti-gagal-low-memory).
+- **Remote access via Cloudflare Tunnel** — one-liner script buat bikin public HTTPS URL gratis tanpa port forward / domain. Lihat [Remote access jarak jauh](#apakah-bisa-diakses-jarak-jauh).
 
 ## Cara kerja
 
@@ -283,7 +286,21 @@ Setelah connect, cek IP Tailscale PC: `tailscale ip -4`. Akses dari HP (meski HP
 
 ### Opsi 2 — Cloudflare Tunnel (gratis, public HTTPS)
 
-Kalau kamu punya domain di Cloudflare:
+**Cara paling cepet (nggak perlu domain)** — pakai *quick tunnel*: cloudflared kasih URL `https://*.trycloudflare.com` gratis selama prosesnya jalan. Di repo ini ada helper script yang download binary-nya otomatis:
+
+```bash
+# Linux / macOS
+./scripts/cloudflared-setup.sh              # pake port default 5000
+./scripts/cloudflared-setup.sh --port 5050  # port lain
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File .\scripts\cloudflared-setup.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\cloudflared-setup.ps1 -Port 5050
+```
+
+Copy URL `https://xxx-xxx.trycloudflare.com` yang muncul di output → share ke HP, ke teman, atau buat diakses dari luar rumah. HP nggak perlu di WiFi yang sama. Kelemahan: URL berubah tiap restart, dan masih belum ada auth — share URL-nya ke orang yang kamu percaya aja.
+
+**Cara permanen (punya domain di Cloudflare)** — bikin tunnel permanen dengan subdomain tetap:
 
 ```bash
 # Install cloudflared di PC:
@@ -517,6 +534,27 @@ GitHub Actions (`.github/workflows/ci.yml`) jalanin:
 - **Smoke test** (Linux / macOS / Windows, Node 20) — `node scripts/smoke-test.js`
 - **Audit** — `npm audit --omit=dev --audit-level=high` (non-blocking)
 
+## Auto-update (Electron)
+
+App desktop pake [electron-updater](https://www.electron.build/auto-update) buat cek versi terbaru dari **GitHub Releases**. Cara kerjanya:
+
+- Pas startup (setelah window muncul ~5 detik), app cek rilis terbaru di `github.com/faizinuha/lan-file-share/releases`. Kalau versi `package.json` di app < versi release terbaru, muncul toast + modal "Update tersedia" dengan tombol **Download**.
+- Download jalan di background (progress bar di modal). Kalau udah selesai, tombol berubah jadi **Install & restart** — klik, app keluar + installer kecil jalan, abis itu app buka lagi di versi baru.
+- Tombol manual **"Cek update"** di topbar buat cek on-demand.
+- Kalau app dijalanin dengan `npm start` (dev mode), updater dimatikan otomatis (`app.isPackaged === false`).
+
+Untuk maintainer yang mau rilis versi baru: bump `package.json` version → `git tag vX.Y.Z && git push --tags` → GitHub Actions `release.yml` build 3 OS + upload artifact + `latest.yml/latest-mac.yml/latest-linux.yml` ke GitHub Release. Setelah Release di-publish (un-draft), semua user dapet notifikasi update otomatis di startup berikutnya.
+
+## Upload dari HP (anti-gagal low-memory)
+
+HP murah / lama sering gagal upload foto besar karena (1) camera JPEG 5-20 MB, (2) browser coba buffer seluruh body di RAM, dan (3) satu paket TCP drop bikin seluruh upload gagal. App ini atasi semua tiga:
+
+1. **Auto-resize foto sebelum upload.** Kalau file bertipe image dan toggle "Auto-resize foto" di toolbar aktif (default ON), foto digambar ulang di `<canvas>` ke max dimensi 2048px + JPEG 85% quality. Foto 5 MB biasanya turun jadi ~300 KB. GIF dan SVG di-skip. File di bawah 500 KB juga di-skip (nggak ada gunanya re-encode). Kalau hasil re-encode justru lebih besar dari asli, file asli dipakai.
+2. **Chunked streaming upload.** File > 8 MB dipecah client-side jadi chunk 4 MB via `File.slice()`. `.slice()` cuma bikin Blob reference — bukan copy — jadi RAM tetep flat walau file 5 GB. Tiap chunk di-POST ke `/api/files/upload-chunk?sessionId=...&chunkIndex=N&totalChunks=M&fileName=...&targetPath=...`. Server simpen tiap chunk ke `<sharedRoot>/.lfs-uploads/<sessionId>/chunk-NNNNNN`, dan pas chunk terakhir masuk, di-reassemble streaming ke file final + cleanup session. Session yang nggantung > 6 jam di-garbage-collect otomatis.
+3. **Retry 3x dengan exponential backoff.** Semua upload (chunked atau tidak) di-wrap di helper retry: kalau xhr error / timeout / HTTP 5xx, coba lagi setelah 0.5s, 1s, 2s (max 4 attempts total). Berarti HP kamu bisa kehilangan koneksi WiFi sebentar, balik lagi, upload lanjut tanpa manual retry.
+
+Semuanya ditangani otomatis — cuma aktifin / matikan toggle resize kalau mau aja (misal ngirim foto original buat cetak). Progress per-file muncul di panel "Upload berlangsung" di atas file list, lengkap dengan indikator chunk ke-berapa.
+
 ## Roadmap
 
 - [ ] **PIN / passcode per-device** (proteksi minimum untuk jaringan umum)
@@ -524,8 +562,11 @@ GitHub Actions (`.github/workflows/ci.yml`) jalanin:
 - [ ] **mDNS / Bonjour discovery** biar nggak perlu ketik IP
 - [ ] **Zip selected files** → download sebagai 1 archive
 - [x] **Build installer** Electron via electron-builder (`.dmg`, `.exe`, `AppImage`, `.deb`) (done)
+- [x] **Auto-update** via electron-updater + GitHub Releases (done)
+- [x] **Chunked / resumable upload** + client-side image resize (done)
+- [x] **Cloudflare Tunnel helper script** buat remote access gratis (done)
 - [ ] **Per-device private folder** (read/write isolation)
-- [ ] **Resume / chunked upload** untuk file sangat besar
+- [ ] **Share foto ke orang (non-register)** via link yang bisa di-browse, bukan cuma 1 file
 - [ ] **Transfer langsung peer-to-peer** via WebRTC (HP → HP tanpa lewat server)
 - [x] **WebDAV** — bisa mount sebagai network drive di file explorer native (done)
 

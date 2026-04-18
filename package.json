@@ -31,6 +31,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "electron-updater": "^6.8.3",
     "express": "^4.19.2",
     "mime-types": "^2.1.35",
     "multer": "^1.4.5-lts.1",
@@ -57,6 +58,7 @@
       "preload.js",
       "server.js",
       "webdav.js",
+      "upload-chunks.js",
       "public/**/*",
       "scripts/generate-icons.js",
       "package.json",
@@ -78,8 +80,20 @@
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] },
-        { "target": "zip", "arch": ["x64", "arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "icon": "build/icon.png",
       "darkModeSupport": true,
@@ -89,16 +103,38 @@
     "dmg": {
       "title": "LAN File Share ${version}",
       "icon": "build/icon.png",
-      "window": { "width": 540, "height": 380 },
+      "window": {
+        "width": 540,
+        "height": 380
+      },
       "contents": [
-        { "x": 140, "y": 200, "type": "file" },
-        { "x": 400, "y": 200, "type": "link", "path": "/Applications" }
+        {
+          "x": 140,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.png",
       "requestedExecutionLevel": "asInvoker"
@@ -115,8 +151,18 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Network;FileTransfer;Utility",
       "icon": "build/icon.png",
@@ -127,6 +173,13 @@
         "Keywords": "share;lan;file;wifi;webdav;pwa;"
       }
     },
-    "publish": null
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "faizinuha",
+        "repo": "lan-file-share",
+        "releaseType": "release"
+      }
+    ]
   }
 }
