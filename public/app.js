@@ -267,18 +267,21 @@ function renderDevices() {
   }
 }
 
-async function kickDevice(id, name) {
-  const ok = await openConfirm({
+function kickDevice(id, name) {
+  // openConfirm is callback-based (onOk), not Promise-returning. Using
+  // `await` here silently returned undefined and the DELETE never fired.
+  openConfirm({
     title: "Keluarkan dari daftar",
     message: `Yakin keluarkan "${name}" dari daftar device online? Device itu bisa register ulang kapan aja.`,
+    onOk: async () => {
+      try {
+        await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+        toast(`"${name}" dikeluarkan`, "ok");
+      } catch (err) {
+        toast(`Gagal: ${err.message || err}`, "error");
+      }
+    },
   });
-  if (!ok) return;
-  try {
-    await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
-    toast(`"${name}" dikeluarkan`, "success");
-  } catch (err) {
-    toast(`Gagal: ${err.message || err}`, "error");
-  }
 }
 
 function escapeHtml(s) {
@@ -1001,6 +1004,8 @@ function wireInstallHp() {
     hide(pre); hide(starting); hide(errBox); show(running);
     urlEl.textContent = publicUrl;
     try {
+      // /api/qrcode accepts an arbitrary `url` param — without this the
+      // server would fall back to the LAN URL, defeating the tunnel.
       const res = await fetch(`/api/qrcode?url=${encodeURIComponent(publicUrl)}`);
       const data = await res.json();
       qrEl.src = data.dataUrl || "";

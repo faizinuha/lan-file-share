@@ -207,9 +207,18 @@ async function startServer(options) {
   });
 
   app.get("/api/qrcode", async (req, res) => {
-    const lan = getLanAddresses()[0];
-    const ip = (req.query.ip && String(req.query.ip)) || (lan && lan.address) || "127.0.0.1";
-    const url = `http://${ip}:${port}/`;
+    // Accept an explicit URL (e.g. the Cloudflare Tunnel HTTPS URL) so the
+    // frontend can QR-encode arbitrary destinations. Falls back to the LAN
+    // URL derived from ?ip= (or the first detected interface).
+    let url;
+    const explicitUrl = req.query.url && String(req.query.url);
+    if (explicitUrl && /^https?:\/\//i.test(explicitUrl)) {
+      url = explicitUrl;
+    } else {
+      const lan = getLanAddresses()[0];
+      const ip = (req.query.ip && String(req.query.ip)) || (lan && lan.address) || "127.0.0.1";
+      url = `http://${ip}:${port}/`;
+    }
     try {
       const dataUrl = await QRCode.toDataURL(url, { margin: 1, width: 220 });
       res.json({ url, dataUrl });
