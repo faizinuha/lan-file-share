@@ -18,6 +18,7 @@
 - [Akses dari HP (PWA)](#akses-dari-hp-pwa)
 - [Mode server-only](#mode-server-only-tanpa-electron)
 - [Apakah bisa diakses jarak jauh?](#apakah-bisa-diakses-jarak-jauh)
+- [Auto-release (Conventional Commits)](#auto-release-conventional-commits)
 - [API reference](#api-reference)
 - [Konfigurasi & environment](#konfigurasi--environment)
 - [Struktur folder](#struktur-folder)
@@ -543,7 +544,44 @@ App desktop pake [electron-updater](https://www.electron.build/auto-update) buat
 - Tombol manual **"Cek update"** di topbar buat cek on-demand.
 - Kalau app dijalanin dengan `npm start` (dev mode), updater dimatikan otomatis (`app.isPackaged === false`).
 
-Untuk maintainer yang mau rilis versi baru: bump `package.json` version → `git tag vX.Y.Z && git push --tags` → GitHub Actions `release.yml` build 3 OS + upload artifact + `latest.yml/latest-mac.yml/latest-linux.yml` ke GitHub Release. Setelah Release di-publish (un-draft), semua user dapet notifikasi update otomatis di startup berikutnya.
+Untuk maintainer yang mau rilis versi baru, ada dua cara:
+
+**(A) Otomatis lewat Conventional Commits — default.** Cukup commit ke `main` pakai format `feat: ...`, `fix: ...`, atau `feat!: ...`, lalu workflow [`release-auto.yml`](.github/workflows/release-auto.yml) nge-bump `package.json`, bikin tag `vX.Y.Z`, dan dispatch `release.yml` yang build 3 OS + publish GitHub Release. User yang udah install app dapat notifikasi update otomatis. Detail konvensinya lihat [Auto-release](#auto-release-conventional-commits) di bawah.
+
+**(B) Manual kalau mau full control.** Bump `package.json` version sendiri → `git tag vX.Y.Z && git push --tags` → GitHub Actions `release.yml` build 3 OS + upload artifact + `latest.yml/latest-mac.yml/latest-linux.yml` ke GitHub Release.
+
+## Auto-release (Conventional Commits)
+
+Tiap push ke `main` di-scan pake [`scripts/conventional-bump.js`](scripts/conventional-bump.js). Kalau ada commit yang matching pola di bawah, workflow [`release-auto.yml`](.github/workflows/release-auto.yml) otomatis:
+
+1. Tentuin level bump (patch / minor / major) dari commit subjects.
+2. `npm version X.Y.Z --no-git-tag-version` → update `package.json` + `package-lock.json`.
+3. Prepend entry baru ke `CHANGELOG.md` (release notes di-generate dari commit subjects).
+4. Commit `chore(release): vX.Y.Z [skip release]` + annotated tag `vX.Y.Z`, push ke `main`.
+5. Dispatch `release.yml` buat build `.exe` / `.dmg` / `.AppImage` / `.deb` dan publish GitHub Release — electron-updater di app yang udah ke-install bakal auto-notify.
+
+### Format commit
+
+Pakai [Conventional Commits](https://www.conventionalcommits.org) versi minimal:
+
+| Subject prefix | Contoh | Efek |
+|---|---|---|
+| `feat:` / `feat(scope):` | `feat(upload): add drag & drop` | **minor** bump (0.2.0 → 0.3.0) |
+| `fix:` / `fix(scope):` | `fix(server): guard ENOENT on preview` | **patch** bump (0.2.0 → 0.2.1) |
+| `perf:` | `perf(chunks): stream reassembly` | **patch** bump |
+| `feat!:` / `fix!:` / body punya `BREAKING CHANGE:` | `feat!: change WebDAV url prefix` | **major** bump (0.2.0 → 1.0.0) |
+| `chore:` / `docs:` / `refactor:` / `test:` / `ci:` / `build:` / `style:` / `revert:` | `docs: fix typo` | **tidak rilis** — push ditolerir, skip aja |
+
+### Skip / force / troubleshoot
+
+- **Skip 1 commit**: tulis `[skip release]` di body commit, atau di-merge-commit via squash pakai pesan `chore: ...`.
+- **Force bump manual**: trigger `release-auto.yml` lewat GitHub UI (`Actions` → `Auto-release` → `Run workflow`) dan isi `force_bump` = `patch` / `minor` / `major`. Ini bypass parser — berguna kalau Conventional Commits dibungkus squash-merge dan parser nggak ketemu prefix.
+- **Ngga ada commit rilisable**: workflow exit 0 tanpa tag — aman.
+- **Lihat perhitungan lokal sebelum push**: `node scripts/conventional-bump.js` — output `bump=…`, `new_version=…`, `notes=…` ke stdout (dry-run, nggak modifikasi apa pun).
+
+### Kenapa nggak pake `standard-version` / `semantic-release`?
+
+Script 170-line tanpa deps tambahan lebih gampang di-audit dan nggak masuk ke `node_modules` buat user yang cuma mau install app. Juga nggak ada risk tools auto-release nge-publish ke npm registry (app ini bukan library).
 
 ## Upload dari HP (anti-gagal low-memory)
 
