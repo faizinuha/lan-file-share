@@ -348,6 +348,11 @@ async function loadFiles(relPath) {
     state.entries = entries || [];
     renderFileList(state.entries);
   } catch (err) {
+    // Reset cached entries on failure — otherwise `setUploaderFilter` would
+    // re-render the previous directory's files underneath the new breadcrumb
+    // when the user clicks a chip after a load error.
+    state.entries = [];
+    renderFileList(state.entries);
     toast("Gagal buka folder: " + err.message, "error");
   }
 }
