@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.0 — 2026-04-18
+
+### Features
+- **hp**: kick device, system tray, install-to-HP via Cloudflare Tunnel, Web Share Target (a000867)
+
+### Bug Fixes
+- **ci**: force_bump path must also bump off highest tag, not package.json (0056fbe)
+- **ci**: release.yml bump off highest tag, use refs/tags/... on checkout (efeb3b0)
+- **review**: 45s tunnel timeout must not kill newer active proc (040c1c9)
+- **review**: tunnel finish() must not clobber newer proc's starting flag (3741da5)
+- **review**: tunnel exit handler race + tray open-modal event handler (e1f9b96)
+- **review**: kickDevice uses onOk callback; /api/qrcode accepts url param (17bc4b0)
+
 All notable changes to this project are documented here. Entries below
 `v0.3.0` are hand-curated; from `v0.3.0` onward the
 [`Auto-release (Conventional Commits)`](.github/workflows/release-auto.yml)

@@ -1,6 +1,6 @@
 {
   "name": "lan-file-share",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "private": true,
   "description": "LAN file sharing between PC (Electron) and phone (PWA). Register with a device name, browse, upload, download, preview, search, delete, rename, mkdir, WebDAV mount, and generate share links over your local network.",
   "main": "main.js",
