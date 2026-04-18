@@ -97,9 +97,20 @@ jobs:
               major|minor|patch) ;;
               *) echo "Invalid force_bump: $FORCE_BUMP" >&2; exit 1 ;;
             esac
-            current=$(node -p "require('./package.json').version")
-            next=$(node -e "
-              const v = require('./package.json').version.split('.').map(Number);
+            # Match the auto-bump baseline: use the highest v* tag (by
+            # git's version sorter, so v0.10.0 > v0.9.0) and only fall
+            # back to package.json if no v* tags exist yet. Bumping off
+            # package.json alone would regress when package.json lags
+            # behind published tags (e.g. pkg=0.4.0 but v1.0.0 is tagged
+            # -> force patch would compute v0.4.1 < v1.0.0).
+            last_tag=$(git for-each-ref --sort=-version:refname --count=1 --format="%(refname:short)" "refs/tags/v*" || true)
+            if [ -n "$last_tag" ]; then
+              current="${last_tag#v}"
+            else
+              current=$(node -p "require('./package.json').version")
+            fi
+            next=$(CURRENT="$current" node -e "
+              const v = process.env.CURRENT.split('.').map(Number);
               const kind = process.env.FORCE_BUMP;
               if (kind==='major'){v[0]+=1;v[1]=0;v[2]=0;}
               else if (kind==='minor'){v[1]+=1;v[2]=0;}
@@ -111,7 +122,7 @@ jobs:
               echo "current_version=$current"
               echo "new_version=$next"
               echo "notes<<EOF"
-              echo "Manually triggered $FORCE_BUMP release."
+              echo "Manually triggered $FORCE_BUMP release (baseline: ${last_tag:-package.json $current})."
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           else
