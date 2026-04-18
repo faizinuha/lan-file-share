@@ -97,6 +97,14 @@
               <button id="btn-upload" class="primary">Upload</button>
               <button id="btn-mkdir" class="ghost">Folder baru</button>
             </div>
+            <!-- Uploader filter: semua file masuk folder yang sama; chip ini
+                 ngefilter tampilan berdasarkan siapa yang upload. -->
+            <div class="uploader-filter" role="tablist" aria-label="Filter berdasarkan uploader">
+              <button type="button" class="chip active" data-filter="all" role="tab">Semua</button>
+              <button type="button" class="chip" data-filter="me" role="tab">Dari aku</button>
+              <button type="button" class="chip" data-filter="mobile" role="tab">Dari HP</button>
+              <button type="button" class="chip" data-filter="pc" role="tab">Dari PC</button>
+            </div>
             <input id="file-input" type="file" multiple hidden />
 
             <div id="upload-panel" class="upload-panel hidden" aria-live="polite">

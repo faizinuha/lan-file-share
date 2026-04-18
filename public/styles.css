@@ -198,6 +198,30 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1p
 .breadcrumbs .crumb.current { color: var(--text); background: var(--panel-alt); cursor: default; }
 .breadcrumbs .sep { color: var(--muted); }
 
+/* Uploader filter chips (toolbar row below breadcrumbs). */
+.uploader-filter {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0 12px;
+  flex-wrap: wrap;
+}
+.uploader-filter .chip {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease, border-color 0.1s ease;
+}
+.uploader-filter .chip:hover { background: var(--panel); color: var(--text); }
+.uploader-filter .chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 .file-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -229,6 +253,27 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1p
 .file-card .meta { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
 .file-card .actions { display: flex; gap: 4px; flex-wrap: wrap; }
 .file-card .actions button { padding: 4px 8px; font-size: 12px; }
+
+/* Uploader badge (e.g. "📱 HP-Faiz" / "💻 PC-Zaky") rendered on each file
+ * card so users can tell at a glance which device dropped a file without
+ * opening it. Color-coded by device kind; `.from-me` highlights files
+ * uploaded from the current device. */
+.file-card .uploader-badge {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-card .uploader-badge.from-mobile { border-color: #34d399; color: #6ee7b7; }
+.file-card .uploader-badge.from-pc { border-color: #60a5fa; color: #93c5fd; }
+.file-card .uploader-badge.from-me { background: rgba(59, 130, 246, 0.18); color: #bfdbfe; border-color: var(--accent); }
 
 .empty {
   margin-top: 40px;
