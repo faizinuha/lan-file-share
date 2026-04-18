@@ -1,0 +1,159 @@
+name: Auto-release (Conventional Commits)
+
+# Watches pushes to `main` and, when the new commits include feat/fix/perf
+# subjects (or a breaking change), it:
+#
+#   1. computes the next semver level via scripts/conventional-bump.js,
+#   2. bumps package.json via `npm version --no-git-tag-version`,
+#   3. prepends a changelog entry,
+#   4. commits, annotated-tags `vX.Y.Z`, and pushes `main`.
+#
+# The tag push then triggers the existing `release.yml` workflow, which
+# builds installers for all three OSes and attaches them to a GitHub
+# Release — which is what `electron-updater` picks up to notify installed
+# clients.
+#
+# Commits marked `chore(release): ...` are skipped (that's how the bot
+# avoids looping on its own release commit). Regular chore/docs/refactor
+# commits are tolerated but don't trigger a bump — the script exits 0 with
+# no `new_version` output and the `release` job is skipped.
+
+on:
+  push:
+    branches: [main]
+  # Manual escape hatch: force a specific bump regardless of commits.
+  workflow_dispatch:
+    inputs:
+      force_bump:
+        description: "Force bump type (patch | minor | major). Leave empty for auto."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Skip the release commit the bot just made so we don't loop, and skip
+    # any PR that opts out via `[skip release]` in the merge commit body.
+    if: >-
+      !startsWith(github.event.head_commit.message, 'chore(release):') &&
+      !contains(github.event.head_commit.message, '[skip release]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # fetch-tags so `git describe` sees prior v* tags.
+          fetch-tags: true
+          # A PAT would be needed to trigger downstream workflows. The
+          # default GITHUB_TOKEN is intentionally used here; the tag push
+          # triggers `release.yml` via the tag filter even with the
+          # default token because both workflows live in the same repo.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install deps (for npm version + lint sanity)
+        run: npm ci --no-audit --no-fund
+
+      - name: Compute bump
+        id: bump
+        env:
+          FORCE_BUMP: ${{ github.event.inputs.force_bump }}
+        run: |
+          if [ -n "${FORCE_BUMP:-}" ]; then
+            echo "Forced bump: $FORCE_BUMP"
+            current=$(node -p "require('./package.json').version")
+            case "$FORCE_BUMP" in
+              major|minor|patch) ;;
+              *) echo "Invalid force_bump: $FORCE_BUMP" >&2; exit 1 ;;
+            esac
+            next=$(node -e "
+              const v = require('./package.json').version.split('.').map(Number);
+              const kind = process.env.FORCE_BUMP;
+              if (kind==='major'){v[0]+=1;v[1]=0;v[2]=0;}
+              else if (kind==='minor'){v[1]+=1;v[2]=0;}
+              else {v[2]+=1;}
+              console.log(v.join('.'));
+            ")
+            {
+              echo "bump=$FORCE_BUMP"
+              echo "current_version=$current"
+              echo "new_version=$next"
+              echo "notes<<EOF"
+              echo "Manually triggered $FORCE_BUMP release."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            node scripts/conventional-bump.js
+          fi
+
+      - name: No-op if no bump
+        if: steps.bump.outputs.new_version == ''
+        run: echo "No releasable commits since last tag; skipping."
+
+      - name: Bump package.json
+        if: steps.bump.outputs.new_version != ''
+        run: |
+          npm version "${{ steps.bump.outputs.new_version }}" \
+            --no-git-tag-version \
+            --allow-same-version
+
+      - name: Update CHANGELOG.md
+        if: steps.bump.outputs.new_version != ''
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          NOTES: ${{ steps.bump.outputs.notes }}
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          header="## v${NEW_VERSION} — ${today}"
+          if [ ! -f CHANGELOG.md ]; then
+            printf "# Changelog\n\nAll notable changes. Auto-generated from Conventional Commits.\n\n" > CHANGELOG.md
+          fi
+          tmp=$(mktemp)
+          {
+            # Keep everything up to and including the first blank line after
+            # the "# Changelog" title, then insert the new entry, then the
+            # rest.
+            awk 'NR==1{print;next} /^$/ && !inserted {print; print "'"$header"'"; print ""; print ENVIRON["NOTES"]; print ""; inserted=1; next} {print}' \
+              inserted=0 CHANGELOG.md
+          } > "$tmp"
+          mv "$tmp" CHANGELOG.md
+          echo "--- CHANGELOG.md preview ---"
+          head -40 CHANGELOG.md
+
+      - name: Commit, tag, push
+        if: steps.bump.outputs.new_version != ''
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          NOTES: ${{ steps.bump.outputs.notes }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json CHANGELOG.md
+          git commit -m "chore(release): v${NEW_VERSION} [skip release]" -m "${NOTES}"
+          git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}" -m "${NOTES}"
+          git push origin main --follow-tags
+
+      # GitHub's default GITHUB_TOKEN intentionally does NOT trigger
+      # downstream workflows from `on: push` events, so the tag push alone
+      # won't start release.yml. We explicitly dispatch release.yml on the
+      # tag ref — workflow_dispatch IS allowed to trigger with the default
+      # token, and release.yml's ref-based publish logic already handles
+      # both push:tags and workflow_dispatch on a tag ref identically.
+      - name: Trigger release.yml to build & publish installers
+        if: steps.bump.outputs.new_version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          gh workflow run release.yml --ref "v${NEW_VERSION}"
+          echo "Dispatched release.yml on v${NEW_VERSION}; 3-OS installers + GitHub Release will be produced there."
