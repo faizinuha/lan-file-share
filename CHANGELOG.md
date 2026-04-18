@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.1 — 2026-04-18
+
+### Bug Fixes
+- **review**: reset state.entries on failed loadFiles to avoid stale render (8bc7e33)
+
 ## v0.6.0 — 2026-04-18
 
 ### Features
