@@ -85,11 +85,11 @@ function request(method, urlPath, body, extraHeaders) {
   });
 }
 
-function multipartUpload(urlPath, filename, content) {
-  return multipartUploadField(urlPath, "files", filename, content);
+function multipartUpload(urlPath, filename, content, extraHeaders) {
+  return multipartUploadField(urlPath, "files", filename, content, extraHeaders);
 }
 
-function multipartUploadField(urlPath, fieldName, filename, content) {
+function multipartUploadField(urlPath, fieldName, filename, content, extraHeaders) {
   return new Promise((resolve, reject) => {
     const boundary = "----lfsboundary" + Date.now();
     const head = Buffer.from(
@@ -108,6 +108,7 @@ function multipartUploadField(urlPath, fieldName, filename, content) {
       headers: {
         "Content-Type": `multipart/form-data; boundary=${boundary}`,
         "Content-Length": payload.length,
+        ...(extraHeaders || {}),
       },
     };
     const req = http.request(opts, (res) => {
@@ -141,6 +142,19 @@ async function main() {
     check("POST /api/devices/register", reg.status === 200 && reg.body.device && reg.body.device.id);
 
     const devId = reg.body && reg.body.device && reg.body.device.id;
+    const devName = reg.body && reg.body.device && reg.body.device.name;
+
+    // Registration must NOT auto-create a `<DeviceName>-xxxx/` personal
+    // folder anymore — the whole point of the UX rework is that every
+    // device shares the same root and uploader identity is tracked as
+    // metadata instead of a physical folder.
+    const rootEntries = fs.readdirSync(tmpRoot).filter((n) => !n.startsWith("."));
+    const hasPersonalFolder = rootEntries.some((n) => n.startsWith(devName + "-"));
+    check(
+      "register does NOT create a per-device folder",
+      !hasPersonalFolder,
+      hasPersonalFolder ? `leaked folders: ${rootEntries.join(", ")}` : undefined,
+    );
 
     const ping = await request("POST", `/api/devices/${encodeURIComponent(devId)}/ping`);
     check("POST /api/devices/:id/ping", ping.status === 200);
@@ -152,12 +166,46 @@ async function main() {
     const mkdir = await request("POST", "/api/files/mkdir", { path: "", name: "uploads" });
     check("POST /api/files/mkdir", mkdir.status === 200);
 
-    const upload = await multipartUpload("/api/files/upload?path=uploads", "hello.txt", "hello world\n");
+    const upload = await multipartUpload(
+      "/api/files/upload?path=uploads",
+      "hello.txt",
+      "hello world\n",
+      {
+        "x-lfs-device-id": devId,
+        "x-lfs-device-name": devName,
+        "x-lfs-device-kind": "mobile",
+      },
+    );
     check("POST /api/files/upload", upload.status === 200 && upload.body.uploaded && upload.body.uploaded.length === 1);
 
     const list = await request("GET", "/api/files?path=uploads");
     check("GET /api/files lists uploaded file",
       list.status === 200 && list.body.entries.some((e) => e.name === "hello.txt"));
+
+    // Uploader metadata round-trip: the upload carried x-lfs-device-* headers,
+    // so the listing must include `uploader: { id, name, kind, at }`.
+    const helloEntry = list.body.entries.find((e) => e.name === "hello.txt");
+    check(
+      "upload attaches uploader metadata (id/name/kind)",
+      !!(helloEntry && helloEntry.uploader &&
+        helloEntry.uploader.id === devId &&
+        helloEntry.uploader.name === devName &&
+        helloEntry.uploader.kind === "mobile"),
+      helloEntry ? JSON.stringify(helloEntry.uploader) : "no entry",
+    );
+
+    // Anonymous upload (no device headers — e.g. WebDAV / curl) should
+    // still succeed but list the file without an uploader field.
+    const anonUpload = await multipartUpload(
+      "/api/files/upload?path=uploads", "anon.txt", "anonymous\n",
+    );
+    check("anonymous upload succeeds without device headers", anonUpload.status === 200);
+    const listAnon = await request("GET", "/api/files?path=uploads");
+    const anonEntry = listAnon.body.entries.find((e) => e.name === "anon.txt");
+    check(
+      "anonymous upload has no uploader field",
+      !!(anonEntry && anonEntry.uploader === undefined),
+    );
 
     const search = await request("GET", "/api/files/search?query=hello");
     check("GET /api/files/search finds file",
@@ -165,6 +213,14 @@ async function main() {
 
     const rename = await request("POST", "/api/files/rename", { path: "uploads/hello.txt", newName: "hi.txt" });
     check("POST /api/files/rename", rename.status === 200);
+
+    // Uploader badge must follow the file across renames.
+    const listAfterRename = await request("GET", "/api/files?path=uploads");
+    const renamedEntry = listAfterRename.body.entries.find((e) => e.name === "hi.txt");
+    check(
+      "rename preserves uploader metadata",
+      !!(renamedEntry && renamedEntry.uploader && renamedEntry.uploader.id === devId),
+    );
 
     const share = await request("POST", "/api/share", { path: "uploads/hi.txt", expiresInMinutes: 1 });
     check("POST /api/share returns token", share.status === 200 && typeof share.body.token === "string");
@@ -184,6 +240,15 @@ async function main() {
     const listAfter = await request("GET", "/api/files?path=uploads");
     check("file is actually deleted",
       listAfter.status === 200 && !listAfter.body.entries.some((e) => e.name === "hi.txt"));
+
+    // Meta sidecar should have dropped the renamed-then-deleted entry.
+    const metaPath = path.join(tmpRoot, "uploads", ".lan-share-meta.json");
+    let metaAfterDelete = null;
+    try { metaAfterDelete = JSON.parse(fs.readFileSync(metaPath, "utf8")); } catch (_e) { /* ok */ }
+    check(
+      "delete clears uploader metadata entry",
+      !metaAfterDelete || !metaAfterDelete.files || !metaAfterDelete.files["hi.txt"],
+    );
 
     const traversal = await request("GET", "/api/files?path=..%2F..%2Fetc");
     check("path traversal is blocked", traversal.status === 400);
@@ -254,11 +319,16 @@ async function main() {
       `/api/files/upload-chunk?sessionId=${sid}&chunkIndex=${idx}&totalChunks=3` +
       `&fileName=chunked.bin&targetPath=uploads`;
 
-    const c0 = await rawRequest("POST", mkChunkUrl(0), chunk0, "application/octet-stream");
+    const chunkHeaders = {
+      "x-lfs-device-id": devId,
+      "x-lfs-device-name": devName,
+      "x-lfs-device-kind": "mobile",
+    };
+    const c0 = await rawRequest("POST", mkChunkUrl(0), chunk0, "application/octet-stream", chunkHeaders);
     check("POST /api/files/upload-chunk 0/3 accepted", c0.status === 200);
-    const c1 = await rawRequest("POST", mkChunkUrl(1), chunk1, "application/octet-stream");
+    const c1 = await rawRequest("POST", mkChunkUrl(1), chunk1, "application/octet-stream", chunkHeaders);
     check("POST /api/files/upload-chunk 1/3 accepted", c1.status === 200);
-    const c2 = await rawRequest("POST", mkChunkUrl(2), chunk2, "application/octet-stream");
+    const c2 = await rawRequest("POST", mkChunkUrl(2), chunk2, "application/octet-stream", chunkHeaders);
     check(
       "POST /api/files/upload-chunk 2/3 assembles file",
       c2.status === 200 && /"assembled":true/.test(c2.raw || "")
@@ -268,6 +338,17 @@ async function main() {
     check(
       "chunked file reassembles identically",
       chunkGet.status === 200 && chunkGet.raw === expected
+    );
+
+    // Chunked uploads must also persist uploader metadata (this path
+    // forwards req into onComplete, distinct code path from multer).
+    const chunkList = await request("GET", "/api/files?path=uploads");
+    const chunkedEntry = chunkList.body.entries.find((e) => e.name === "chunked.bin");
+    check(
+      "chunked upload attaches uploader metadata",
+      !!(chunkedEntry && chunkedEntry.uploader &&
+        chunkedEntry.uploader.id === devId &&
+        chunkedEntry.uploader.kind === "mobile"),
     );
 
     // Path traversal through chunked endpoint must be blocked.

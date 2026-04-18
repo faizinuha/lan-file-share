@@ -9,6 +9,10 @@ const state = {
   ws: null,
   pingTimer: null,
   searchTimer: null,
+  // Last fetched listing, cached so the uploader filter ("Semua / Dari HP /
+  // Dari PC / Dari aku") can re-render without another network round-trip.
+  entries: [],
+  uploaderFilter: "all", // all | mobile | pc | me
   // Upload preferences (can be tweaked from the UI).
   uploadPrefs: {
     autoResizeImages: true,
@@ -341,10 +345,33 @@ async function loadFiles(relPath) {
   renderBreadcrumbs();
   try {
     const { entries } = await api(`/api/files?path=${encodeURIComponent(state.currentPath)}`);
-    renderFileList(entries);
+    state.entries = entries || [];
+    renderFileList(state.entries);
   } catch (err) {
     toast("Gagal buka folder: " + err.message, "error");
   }
+}
+
+function setUploaderFilter(next) {
+  state.uploaderFilter = next;
+  document.querySelectorAll(".uploader-filter .chip").forEach((el) => {
+    el.classList.toggle("active", el.dataset.filter === next);
+  });
+  renderFileList(state.entries);
+}
+
+function entryMatchesFilter(entry) {
+  const f = state.uploaderFilter;
+  if (f === "all") return true;
+  // Always surface folders (they have no uploader) so the filter doesn't
+  // hide the navigational tree.
+  if (entry.isDirectory) return true;
+  const u = entry.uploader;
+  if (!u) return false;
+  if (f === "me") return state.me && u.id === state.me.id;
+  if (f === "mobile") return u.kind === "mobile";
+  if (f === "pc") return u.kind === "pc";
+  return true;
 }
 
 function fileIcon(entry) {
@@ -358,16 +385,31 @@ function fileIcon(entry) {
   return "?";
 }
 
+function uploaderBadgeLabel(u) {
+  const kindIcon = u.kind === "mobile" ? "\u{1F4F1}" : u.kind === "pc" ? "\u{1F4BB}" : "\u{1F4E6}";
+  // e.g. "📱 HP-Faiz" / "💻 PC-Zaky"
+  return `${kindIcon} ${u.name || (u.kind === "mobile" ? "HP" : "PC")}`;
+}
+
 function renderFileList(entries) {
   const list = $("file-list");
   const empty = $("empty-state");
   list.innerHTML = "";
-  if (!entries || entries.length === 0) {
+  const visible = (entries || []).filter(entryMatchesFilter);
+  if (visible.length === 0) {
     show(empty);
+    // Swap empty-state copy so users don't think the folder is actually
+    // empty when a filter is just hiding everything.
+    const msg = $("empty-state");
+    if (state.uploaderFilter !== "all" && entries && entries.length > 0) {
+      msg.innerHTML = "<p>Nggak ada file yang cocok filter.</p><p class=\"muted\">Pilih <em>Semua</em> buat lihat semuanya.</p>";
+    } else {
+      msg.innerHTML = "<p>Folder kosong.</p><p class=\"muted\">Upload file buat mulai berbagi.</p>";
+    }
     return;
   }
   hide(empty);
-  for (const e of entries) {
+  for (const e of visible) {
     const card = document.createElement("div");
     card.className = "file-card";
     const thumb = document.createElement("div");
@@ -388,6 +430,16 @@ function renderFileList(entries) {
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.innerHTML = `<span>${e.isDirectory ? "folder" : humanSize(e.size)}</span><span>${humanDate(e.mtime)}</span>`;
+    if (!e.isDirectory && e.uploader) {
+      const badge = document.createElement("div");
+      badge.className = "uploader-badge";
+      const kind = e.uploader.kind || "unknown";
+      badge.classList.add(`from-${kind}`);
+      if (state.me && e.uploader.id === state.me.id) badge.classList.add("from-me");
+      badge.textContent = uploaderBadgeLabel(e.uploader);
+      badge.title = `Diupload oleh ${e.uploader.name || "?"} (${kind}) \u00b7 ${humanDate(e.uploader.at)}`;
+      card.appendChild(badge);
+    }
     const actions = document.createElement("div");
     actions.className = "actions";
 
@@ -651,6 +703,19 @@ function addUploadItem(name, size) {
   };
 }
 
+// Attach uploader identity headers so the server can persist "uploaded
+// by HP-Faiz [mobile]" metadata next to the file. Falls back to noop if
+// registration hasn't completed yet (shouldn't happen: upload buttons
+// are gated by enterApp()).
+function applyUploaderHeaders(xhr) {
+  const me = state.me;
+  if (!me) return;
+  // Header names are sent lowercase per HTTP; server extracts case-insensitive.
+  xhr.setRequestHeader("x-lfs-device-id", me.id || "");
+  xhr.setRequestHeader("x-lfs-device-name", me.name || "");
+  xhr.setRequestHeader("x-lfs-device-kind", me.kind || "");
+}
+
 async function uploadOneSmall(file, targetPath, ui) {
   const url = `/api/files/upload?path=${encodeURIComponent(targetPath)}`;
   const prefs = state.uploadPrefs;
@@ -659,6 +724,7 @@ async function uploadOneSmall(file, targetPath, ui) {
     await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", url, true);
+      applyUploaderHeaders(xhr);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) ui.setProgress((e.loaded / e.total) * 100);
       };
@@ -699,6 +765,7 @@ async function uploadOneChunked(file, targetPath, ui) {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", url, true);
         xhr.setRequestHeader("Content-Type", "application/octet-stream");
+        applyUploaderHeaders(xhr);
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {
             const localFraction = e.loaded / e.total;
@@ -839,7 +906,11 @@ async function doSearch(query) {
   }
   try {
     const { results } = await api(`/api/files/search?query=${encodeURIComponent(query)}&path=${encodeURIComponent(state.currentPath)}`);
-    renderFileList(results);
+    // Replace state.entries so the uploader filter chips operate on the
+    // current search results (otherwise clicking a chip silently reverts
+    // to the last loadFiles() listing — see Devin Review #11 comment).
+    state.entries = results || [];
+    renderFileList(state.entries);
   } catch (err) {
     toast("Pencarian gagal: " + err.message, "error");
   }
@@ -1140,6 +1211,16 @@ function wireUp() {
     e.target.value = "";
   });
   $("btn-mkdir").addEventListener("click", promptMkdir);
+
+  // Uploader filter chips — delegate so we don't care about reorder/add.
+  const filterRow = document.querySelector(".uploader-filter");
+  if (filterRow) {
+    filterRow.addEventListener("click", (e) => {
+      const chip = e.target.closest(".chip[data-filter]");
+      if (!chip) return;
+      setUploaderFilter(chip.dataset.filter);
+    });
+  }
 
   $("search").addEventListener("input", (e) => {
     clearTimeout(state.searchTimer);

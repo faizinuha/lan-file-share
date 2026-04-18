@@ -63,6 +63,123 @@ function slugifyDeviceName(name) {
     .slice(0, 40) || "device";
 }
 
+// --- Uploader metadata --------------------------------------------------
+//
+// Per the UX redesign (no more auto-created `<DeviceName>-xxxx/` folders)
+// every device uploads into the shared root the owner picked. Instead of
+// physical folders we remember *who* uploaded each file by persisting a
+// side-car file `<dir>/.lan-share-meta.json` with:
+//
+//   { "version": 1,
+//     "files": { "<filename>": { id, name, kind, at } } }
+//
+// The dotfile prefix keeps it hidden from every listing (listDir skips
+// names starting with `.`). Readers are tolerant of missing/corrupt JSON
+// — callers always get back `{ version: 1, files: {} }`.
+const META_FILENAME = ".lan-share-meta.json";
+
+function dirMetaPath(absDir) {
+  return path.join(absDir, META_FILENAME);
+}
+
+async function loadDirMeta(absDir) {
+  try {
+    const raw = await fsp.readFile(dirMetaPath(absDir), "utf8");
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object" && data.files && typeof data.files === "object") {
+      return { version: 1, files: data.files };
+    }
+  } catch (_err) { /* missing / corrupt -> start fresh */ }
+  return { version: 1, files: {} };
+}
+
+async function saveDirMeta(absDir, data) {
+  const p = dirMetaPath(absDir);
+  // Write then rename so concurrent readers never see a half-written file.
+  const tmp = `${p}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await fsp.writeFile(tmp, JSON.stringify(data));
+  await fsp.rename(tmp, p);
+}
+
+// Per-directory mutex. All meta mutators are read-modify-write on the same
+// sidecar; without serialization, two concurrent uploads to the same dir
+// would interleave at the `await loadDirMeta()` boundary and the second
+// writer would clobber the first's entry (see Devin Review on #11).
+//
+// In-memory is sufficient: meta writes only originate from this Node
+// process. A Map<absDir, Promise> chains each request onto the previous
+// one for that dir; unrelated dirs stay parallel.
+const dirMetaLocks = new Map();
+function withDirMetaLock(absDir, fn) {
+  const prev = dirMetaLocks.get(absDir) || Promise.resolve();
+  // Swallow prev errors so one failed write doesn't poison the queue.
+  const next = prev.catch(() => {}).then(fn);
+  dirMetaLocks.set(absDir, next);
+  // Best-effort cleanup so the map doesn't leak one entry per ever-touched
+  // directory. Checking identity guards against replacing a newer lock.
+  next.finally(() => {
+    if (dirMetaLocks.get(absDir) === next) dirMetaLocks.delete(absDir);
+  }).catch(() => {});
+  return next;
+}
+
+function setFileMeta(absDir, filename, info) {
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
+    data.files[filename] = info;
+    await saveDirMeta(absDir, data);
+  });
+}
+
+function setManyFileMeta(absDir, entries) {
+  if (!entries || entries.length === 0) return Promise.resolve();
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
+    for (const [filename, info] of entries) {
+      data.files[filename] = info;
+    }
+    await saveDirMeta(absDir, data);
+  });
+}
+
+function renameFileMeta(absDir, oldName, newName) {
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
+    if (data.files[oldName]) {
+      data.files[newName] = data.files[oldName];
+      delete data.files[oldName];
+      await saveDirMeta(absDir, data);
+    }
+  });
+}
+
+function removeFileMeta(absDir, name) {
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
+    if (data.files[name]) {
+      delete data.files[name];
+      await saveDirMeta(absDir, data);
+    }
+  });
+}
+
+// Extract uploader identity from request headers. Both the small and
+// chunked upload paths send:
+//   x-lfs-device-id   : opaque id returned by /api/devices/register
+//   x-lfs-device-name : human-readable name (e.g. "HP-Faiz")
+//   x-lfs-device-kind : "mobile" | "pc"
+// Returns null if the caller didn't send enough info (WebDAV, curl, the
+// OS share sheet) — those uploads just won't carry an uploader badge.
+function extractUploader(req) {
+  const h = (name) => String((req.headers && req.headers[name]) || "").trim();
+  const id = h("x-lfs-device-id").slice(0, 80);
+  const name = h("x-lfs-device-name").slice(0, 80);
+  const rawKind = h("x-lfs-device-kind").toLowerCase();
+  if (!id && !name) return null;
+  const kind = rawKind === "pc" ? "pc" : rawKind === "mobile" ? "mobile" : "unknown";
+  return { id, name, kind, at: Date.now() };
+}
+
 /**
  * @param {{ port?: number, sharedRoot: string, hostDeviceName?: string }} options
  */
@@ -100,10 +217,12 @@ async function startServer(options) {
     };
     devices.set(id, device);
 
-    // Create that device's personal folder (inside sharedRoot) so uploads have a home.
-    const personalDir = path.join(sharedRoot, device.name + "-" + id.slice(-6));
-    fs.mkdirSync(personalDir, { recursive: true });
-    device.folder = path.basename(personalDir);
+    // Every device uploads into the shared root the owner picked; we no
+    // longer auto-create `<DeviceName>-xxxx/` subfolders per register
+    // (those were clutter and confused users into thinking they had to
+    // drop files into "their" folder). Identity is tracked via uploader
+    // metadata sidecars written by the upload handlers; see the
+    // `extractUploader` / `setFileMeta` helpers above.
 
     broadcastDevices();
     return device;
@@ -156,13 +275,20 @@ async function startServer(options) {
 
   async function listDir(absDir, relDir) {
     const entries = await fsp.readdir(absDir, { withFileTypes: true });
+    // Load uploader metadata once per listing (not once per entry) so we
+    // avoid N readFile() calls on directories with hundreds of files.
+    const meta = await loadDirMeta(absDir);
     const out = [];
     for (const e of entries) {
       if (e.name.startsWith(".")) continue; // hide dotfiles for safety/UX
       try {
         const childAbs = path.join(absDir, e.name);
         const childRel = path.posix.join(relDir || "", e.name);
-        out.push(await statEntry(childAbs, childRel));
+        const stat = await statEntry(childAbs, childRel);
+        if (!stat.isDirectory && meta.files[e.name]) {
+          stat.uploader = meta.files[e.name];
+        }
+        out.push(stat);
       } catch (_err) {
         /* ignore unreadable entries */
       }
@@ -289,6 +415,10 @@ async function startServer(options) {
         } catch (_err) {
           return;
         }
+        // Load uploader metadata for *this* directory once (not per match)
+        // so the uploader filter on the client ("Dari HP" / "Dari PC")
+        // works on search results exactly like it does on listDir output.
+        let dirMeta = null;
         for (const e of list) {
           if (results.length >= maxResults) return;
           if (e.name.startsWith(".")) continue;
@@ -297,7 +427,12 @@ async function startServer(options) {
           const childRel = path.posix.join(relDir, e.name);
           if (nameLower.includes(query)) {
             try {
-              results.push(await statEntry(childAbs, childRel));
+              const stat = await statEntry(childAbs, childRel);
+              if (!stat.isDirectory) {
+                if (dirMeta === null) dirMeta = await loadDirMeta(dir);
+                if (dirMeta.files[e.name]) stat.uploader = dirMeta.files[e.name];
+              }
+              results.push(stat);
             } catch (_err) {
               /* ignore */
             }
@@ -365,11 +500,25 @@ async function startServer(options) {
     limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10 GB
   });
 
-  app.post("/api/files/upload", upload.array("files", 50), (req, res) => {
+  app.post("/api/files/upload", upload.array("files", 50), async (req, res) => {
     const uploaded = (req.files || []).map((f) => ({
       name: f.originalname,
       size: f.size,
     }));
+    // Persist uploader metadata so the listing can render a "Uploaded by
+    // HP-Faiz" badge. Failures here are non-fatal: the file itself is
+    // already on disk and listable.
+    const uploader = extractUploader(req);
+    if (uploader && req.files && req.files.length > 0) {
+      try {
+        const targetRel = String(req.query.path || "");
+        const absDir = resolveSafe({ path: targetRel, root: sharedRoot });
+        // multer's filename() sanitized originalname; use that as the key
+        // so the metadata matches what listDir() actually reads from disk.
+        const pairs = req.files.map((f) => [path.basename(f.path), uploader]);
+        await setManyFileMeta(absDir, pairs);
+      } catch (_err) { /* meta is best-effort */ }
+    }
     broadcastEvent({ type: "files-changed", path: String(req.query.path || "") });
     res.json({ uploaded });
   });
@@ -387,7 +536,13 @@ async function startServer(options) {
     createChunkUploadHandler({
       sharedRoot,
       resolveSafe,
-      onComplete: ({ dirRel }) => {
+      onComplete: async ({ dirRel, absPath, req }) => {
+        const uploader = extractUploader(req);
+        if (uploader) {
+          try {
+            await setFileMeta(path.dirname(absPath), path.basename(absPath), uploader);
+          } catch (_err) { /* meta is best-effort */ }
+        }
         broadcastEvent({ type: "files-changed", path: dirRel || "" });
       },
     }),
@@ -423,6 +578,10 @@ async function startServer(options) {
         return res.status(400).json({ error: "invalid path" });
       }
       await fsp.rename(src, dst);
+      // Keep uploader badge attached to the renamed file.
+      try {
+        await renameFileMeta(path.dirname(src), path.basename(src), newName);
+      } catch (_err) { /* meta is best-effort */ }
       broadcastEvent({ type: "files-changed", path: path.posix.dirname(rel) });
       res.json({ ok: true });
     } catch (err) {
@@ -440,6 +599,11 @@ async function startServer(options) {
         return res.status(400).json({ error: "cannot delete root" });
       }
       await fsp.rm(abs, { recursive: true, force: true });
+      // Drop the uploader metadata entry too; harmless if it wasn't there
+      // (e.g. deleting a directory or a file uploaded via WebDAV).
+      try {
+        await removeFileMeta(path.dirname(abs), path.basename(abs));
+      } catch (_err) { /* meta is best-effort */ }
       broadcastEvent({ type: "files-changed", path: path.posix.dirname(rel) });
       res.json({ ok: true });
     } catch (err) {
@@ -533,11 +697,27 @@ async function startServer(options) {
         req.body && req.body.text,
         req.body && req.body.link,
       ].filter(Boolean).join("\n\n");
+      let textFilename = null;
       if (text.trim()) {
         const stamp = new Date().toISOString().replace(/[^0-9A-Za-z]/g, "").slice(0, 14);
         fs.mkdirSync(shareTargetDir(), { recursive: true });
-        await fsp.writeFile(path.join(shareTargetDir(), `${stamp}-shared.txt`), text);
+        textFilename = `${stamp}-shared.txt`;
+        await fsp.writeFile(path.join(shareTargetDir(), textFilename), text);
       }
+      // Tag every shared payload as coming from a phone share sheet. We
+      // don't know *which* phone (the OS share intent doesn't carry app
+      // identity), but users can still see "from phone" vs "from pc".
+      const shareUploader = extractUploader(req) || {
+        id: "share-target",
+        name: "Share from phone",
+        kind: "mobile",
+        at: Date.now(),
+      };
+      try {
+        const pairs = files.map((f) => [path.basename(f.path), shareUploader]);
+        if (textFilename) pairs.push([textFilename, shareUploader]);
+        await setManyFileMeta(shareTargetDir(), pairs);
+      } catch (_err) { /* meta is best-effort */ }
       if (files.length || text.trim()) {
         broadcastEvent({ type: "files-changed", path: "Shared-from-Phone" });
       }

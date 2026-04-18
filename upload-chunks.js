@@ -65,7 +65,7 @@ async function reapOldSessions(sharedRoot) {
  * Create an Express-style middleware that handles POST /api/files/upload-chunk.
  * The caller is expected to have already applied `resolveSafe` on targetPath.
  *
- * @param {{ sharedRoot: string, resolveSafe: (o: { path: string, root: string }) => string, onComplete?: (info: { relPath: string, absPath: string, size: number, dirRel: string }) => void }} opts
+ * @param {{ sharedRoot: string, resolveSafe: (o: { path: string, root: string }) => string, onComplete?: (info: { relPath: string, absPath: string, size: number, dirRel: string, req: import("http").IncomingMessage }) => (void | Promise<void>) }} opts
  */
 function createChunkUploadHandler(opts) {
   const { sharedRoot, resolveSafe, onComplete } = opts;
@@ -174,7 +174,12 @@ function createChunkUploadHandler(opts) {
       const dirRel = String(targetPath || "").replace(/^\/+/, "");
       const relPath = (dirRel ? dirRel + "/" : "") + fileName;
       if (onComplete) {
-        try { onComplete({ relPath, absPath: finalAbs, size: totalSize, dirRel }); } catch (_err) { /* ignore */ }
+        // Pass `req` so the caller can read uploader headers (the small
+        // upload endpoint has the headers inline, the chunk endpoint
+        // needs them forwarded). We await in case the caller persists
+        // metadata asynchronously — otherwise the response could race
+        // the client's subsequent list refresh.
+        try { await onComplete({ relPath, absPath: finalAbs, size: totalSize, dirRel, req }); } catch (_err) { /* ignore */ }
       }
       return res.json({ ok: true, assembled: true, name: fileName, size: totalSize, path: relPath });
     } catch (err) {
