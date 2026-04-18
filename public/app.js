@@ -906,7 +906,11 @@ async function doSearch(query) {
   }
   try {
     const { results } = await api(`/api/files/search?query=${encodeURIComponent(query)}&path=${encodeURIComponent(state.currentPath)}`);
-    renderFileList(results);
+    // Replace state.entries so the uploader filter chips operate on the
+    // current search results (otherwise clicking a chip silently reverts
+    // to the last loadFiles() listing — see Devin Review #11 comment).
+    state.entries = results || [];
+    renderFileList(state.entries);
   } catch (err) {
     toast("Pencarian gagal: " + err.message, "error");
   }

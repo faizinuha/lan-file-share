@@ -385,6 +385,10 @@ async function startServer(options) {
         } catch (_err) {
           return;
         }
+        // Load uploader metadata for *this* directory once (not per match)
+        // so the uploader filter on the client ("Dari HP" / "Dari PC")
+        // works on search results exactly like it does on listDir output.
+        let dirMeta = null;
         for (const e of list) {
           if (results.length >= maxResults) return;
           if (e.name.startsWith(".")) continue;
@@ -393,7 +397,12 @@ async function startServer(options) {
           const childRel = path.posix.join(relDir, e.name);
           if (nameLower.includes(query)) {
             try {
-              results.push(await statEntry(childAbs, childRel));
+              const stat = await statEntry(childAbs, childRel);
+              if (!stat.isDirectory) {
+                if (dirMeta === null) dirMeta = await loadDirMeta(dir);
+                if (dirMeta.files[e.name]) stat.uploader = dirMeta.files[e.name];
+              }
+              results.push(stat);
             } catch (_err) {
               /* ignore */
             }
