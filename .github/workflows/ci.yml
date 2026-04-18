@@ -44,6 +44,21 @@ jobs:
       - name: Run smoke test
         run: node scripts/smoke-test.js
 
+  pack:
+    name: electron-builder pack (sanity check, Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Validate electron-builder config + produce unpacked build
+        run: npx electron-builder --dir --linux
+      - name: List unpacked output
+        run: ls -lah dist/linux-unpacked || true
+
   audit:
     name: npm audit (production only)
     runs-on: ubuntu-latest
