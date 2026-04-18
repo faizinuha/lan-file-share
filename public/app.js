@@ -4,6 +4,8 @@ const state = {
   me: null, // { id, name, kind }
   currentPath: "",
   devices: [],
+  status: null, // { host, sharedRoot, lan, port }
+  tunnel: { running: false, url: null },
   ws: null,
   pingTimer: null,
   searchTimer: null,
@@ -144,13 +146,51 @@ async function enterApp() {
   }
 }
 
+async function updateInstallHint() {
+  const banner = $("install-hint");
+  if (!banner) return;
+  // Only show on HP (mobile), when on plain HTTP from a non-localhost host,
+  // when install can't already be triggered natively, and when the user
+  // hasn't dismissed it.
+  const dismissed = localStorage.getItem("lfs-install-hint-dismissed") === "1";
+  const isMobile = state.me && state.me.kind === "mobile";
+  const isHttp = location.protocol === "http:";
+  const isLocalhost = location.hostname === "127.0.0.1" || location.hostname === "localhost";
+  const alreadyInstalled = window.matchMedia && window.matchMedia("(display-mode: standalone)").matches;
+  if (!dismissed && isMobile && isHttp && !isLocalhost && !alreadyInstalled) {
+    show(banner);
+  } else {
+    hide(banner);
+  }
+}
+
+function maybeShowSharedToast() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const shared = Number(params.get("shared") || 0);
+    if (shared > 0) {
+      const dest = params.get("dest") || "Shared-from-Phone";
+      toast(`${shared} file diterima dari share → ${dest}`, "ok");
+      params.delete("shared");
+      params.delete("dest");
+      const q = params.toString();
+      history.replaceState(null, "", location.pathname + (q ? "?" + q : ""));
+    }
+  } catch (_err) { /* ignore */ }
+}
+
 async function loadStatus() {
   try {
     const s = await api("/api/status");
+    state.status = s;
     const lan = s.lan && s.lan[0];
     if (lan) {
       setText($("server-ip"), `Server: ${lan.address}:${s.port}`);
     }
+    // Device list may have been fetched before status (host id unknown then)
+    // — re-render so the host pill + kick-button gating is correct.
+    renderDevices();
+    updateInstallHint();
   } catch (_err) {
     setText($("server-ip"), "Server: ?");
   }
@@ -209,14 +249,35 @@ function startPinging() {
 function renderDevices() {
   const ul = $("device-list");
   ul.innerHTML = "";
+  const hostId = state.status && state.status.host && state.status.host.id;
   for (const d of state.devices) {
     const li = document.createElement("li");
-    if (state.me && d.id === state.me.id) li.classList.add("me");
+    const isMe = state.me && d.id === state.me.id;
+    const isHost = hostId && d.id === hostId;
+    if (isMe) li.classList.add("me");
+    if (isHost) li.classList.add("host");
+    // Host (PC server) and self are never kickable.
+    const canKick = !isHost && !isMe;
     li.innerHTML = `
-      <span>${escapeHtml(d.name)}</span>
-      <span class="kind">${escapeHtml(d.kind)}</span>
+      <span class="dev-name">${escapeHtml(d.name)}</span>
+      <span class="kind">${escapeHtml(d.kind)}${isHost ? " · host" : ""}</span>
+      ${canKick ? `<button class="kick-btn" data-id="${escapeHtml(d.id)}" title="Keluarkan dari daftar online" aria-label="Keluarkan ${escapeHtml(d.name)} dari daftar">✕</button>` : ""}
     `;
     ul.appendChild(li);
+  }
+}
+
+async function kickDevice(id, name) {
+  const ok = await openConfirm({
+    title: "Keluarkan dari daftar",
+    message: `Yakin keluarkan "${name}" dari daftar device online? Device itu bisa register ulang kapan aja.`,
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+    toast(`"${name}" dikeluarkan`, "success");
+  } catch (err) {
+    toast(`Gagal: ${err.message || err}`, "error");
   }
 }
 
@@ -891,6 +952,120 @@ async function installUpdateNow() {
   }
 }
 
+function wireInstallHp() {
+  const btn = $("install-hp");
+  const modal = $("install-hp-modal");
+  if (!btn || !modal) return;
+
+  const lf = window.lanFileShare;
+  const pre = $("install-hp-prestart");
+  const starting = $("install-hp-starting");
+  const running = $("install-hp-running");
+  const errBox = $("install-hp-error");
+  const errMsg = $("install-hp-error-msg");
+  const urlEl = $("tunnel-url");
+  const qrEl = $("tunnel-qr");
+  const startBtn = $("start-tunnel");
+  const stopBtn = $("stop-tunnel");
+  const retryBtn = $("retry-tunnel");
+  const copyBtn = $("copy-tunnel-url");
+  const downloadLink = $("cloudflared-download");
+
+  // Only the Electron host PC can start a tunnel (PWA on HP can't spawn
+  // child processes), so we show the "Install ke HP" button only there.
+  if (lf && lf.startTunnel) {
+    btn.classList.remove("hidden");
+  }
+
+  btn.addEventListener("click", async () => {
+    show(modal);
+    // Reflect current tunnel state when reopening the modal.
+    if (state.tunnel.running && state.tunnel.url) {
+      showRunning(state.tunnel.url);
+    } else {
+      showPrestart();
+    }
+  });
+
+  function showPrestart() {
+    hide(starting); hide(running); hide(errBox); show(pre);
+  }
+  function showStarting() {
+    hide(pre); hide(running); hide(errBox); show(starting);
+  }
+  function showError(message) {
+    hide(pre); hide(starting); hide(running); show(errBox);
+    errMsg.textContent = message || "Tunnel gagal — cek log";
+  }
+  async function showRunning(publicUrl) {
+    hide(pre); hide(starting); hide(errBox); show(running);
+    urlEl.textContent = publicUrl;
+    try {
+      const res = await fetch(`/api/qrcode?url=${encodeURIComponent(publicUrl)}`);
+      const data = await res.json();
+      qrEl.src = data.dataUrl || "";
+    } catch (_err) { /* qrEl blank is acceptable */ }
+  }
+
+  if (startBtn) startBtn.addEventListener("click", startTunnelFlow);
+  if (retryBtn) retryBtn.addEventListener("click", startTunnelFlow);
+
+  if (stopBtn) stopBtn.addEventListener("click", async () => {
+    if (!lf || !lf.stopTunnel) return;
+    await lf.stopTunnel();
+    state.tunnel = { running: false, url: null };
+    toast("Tunnel dihentikan", "ok");
+    showPrestart();
+  });
+
+  if (copyBtn) copyBtn.addEventListener("click", () => {
+    try {
+      navigator.clipboard.writeText(urlEl.textContent);
+      toast("URL disalin", "ok");
+    } catch (_err) { /* ignore */ }
+  });
+
+  if (downloadLink) downloadLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    const url = "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/";
+    if (lf && lf.openExternal) lf.openExternal(url);
+    else window.open(url, "_blank");
+  });
+
+  async function startTunnelFlow() {
+    if (!lf || !lf.startTunnel) {
+      showError("cloudflared integration hanya jalan di Electron PC");
+      return;
+    }
+    showStarting();
+    try {
+      const res = await lf.startTunnel();
+      if (res && res.ok && res.url) {
+        state.tunnel = { running: true, url: res.url };
+        await showRunning(res.url);
+        toast("Tunnel aktif — scan QR di HP", "ok");
+      } else {
+        showError((res && res.error) || "Tunnel nggak sempat siap (timeout)");
+      }
+    } catch (err) {
+      showError(err && err.message ? err.message : String(err));
+    }
+  }
+
+  if (lf && lf.onTunnelEvent) {
+    lf.onTunnelEvent((evt) => {
+      if (!evt) return;
+      if (evt.type === "ready" && evt.url) {
+        state.tunnel = { running: true, url: evt.url };
+        showRunning(evt.url);
+      } else if (evt.type === "exit") {
+        state.tunnel = { running: false, url: null };
+        if (!modal.classList.contains("hidden")) showPrestart();
+      }
+    });
+  }
+}
+
 function wireUp() {
   els.registerBtn = $("register-btn");
   els.registerBtn.addEventListener("click", registerDevice);
@@ -908,6 +1083,26 @@ function wireUp() {
       toast("Folder diganti. Restart aplikasi buat terapin.", "ok");
     }
   });
+
+  // Delegated click for the per-device kick ("✕") button in the sidebar.
+  $("device-list").addEventListener("click", (e) => {
+    const btn = e.target.closest(".kick-btn");
+    if (!btn) return;
+    const id = btn.getAttribute("data-id");
+    const dev = state.devices.find((d) => d.id === id);
+    kickDevice(id, dev ? dev.name : id);
+  });
+
+  // HTTP-only install hint: user dismisses forever via the ×.
+  const hintDismiss = $("install-hint-dismiss");
+  if (hintDismiss) hintDismiss.addEventListener("click", () => {
+    localStorage.setItem("lfs-install-hint-dismissed", "1");
+    hide($("install-hint"));
+  });
+
+  // Install-to-HP (Cloudflare Tunnel) flow — Electron host only. Buttons
+  // drive main.js via preload IPC; fallback message if we're not in Electron.
+  wireInstallHp();
 
   const checkUpdateBtn = $("check-update");
   if (checkUpdateBtn) checkUpdateBtn.addEventListener("click", manualCheckUpdate);
@@ -976,6 +1171,7 @@ function wireUp() {
 async function init() {
   loadUploadPrefs();
   wireUp();
+  maybeShowSharedToast();
   const saved = loadMe();
   if (saved) {
     state.me = saved;
@@ -997,6 +1193,7 @@ async function init() {
   }
   if (state.me) {
     await enterApp();
+    updateInstallHint();
   }
 }
 

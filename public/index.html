@@ -61,9 +61,20 @@
             <button id="show-qr" class="ghost" title="Tampilkan QR untuk HP">QR</button>
             <button id="change-name" class="ghost" title="Ganti nama">Ganti nama</button>
             <button id="pick-folder" class="ghost hidden" title="Ganti folder (hanya di Electron)">Pilih folder</button>
+            <button id="install-hp" class="ghost hidden" title="Bikin URL HTTPS (Cloudflare Tunnel) biar PWA bisa di-install di HP">Install ke HP</button>
             <button id="check-update" class="ghost hidden" title="Cek update (hanya di Electron)">Cek update</button>
           </div>
         </header>
+
+        <!-- HTTPS install hint for HP users accessing over plain HTTP -->
+        <div id="install-hint" class="install-hint hidden" role="status">
+          <span class="install-hint-icon" aria-hidden="true">📲</span>
+          <div class="install-hint-text">
+            <strong>Mau jadi aplikasi di HP?</strong>
+            <span>Chrome wajib HTTPS buat install PWA. Di PC klik <b>"Install ke HP"</b> di topbar — PC bikin URL HTTPS via Cloudflare Tunnel, trus scan QR-nya dari HP.</span>
+          </div>
+          <button id="install-hint-dismiss" class="ghost small" title="Sembunyikan">×</button>
+        </div>
 
         <main class="layout">
           <aside class="sidebar">
@@ -186,6 +197,48 @@
               <div class="actions">
                 <button class="ghost" data-close>Batal</button>
                 <button id="prompt-ok" class="primary">OK</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Install-to-phone modal (Electron host only — starts a Cloudflare
+             Tunnel child process, shows public HTTPS URL + QR for HP install) -->
+        <div id="install-hp-modal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card">
+            <header>
+              <h3>Install ke HP (HTTPS via Cloudflare Tunnel)</h3>
+              <button class="close" data-close>&times;</button>
+            </header>
+            <div class="install-hp-body">
+              <p class="muted">
+                PWA cuma bisa di-install di HP lewat HTTPS. Button di bawah
+                bikin URL publik <code>*.trycloudflare.com</code> gratis —
+                data tetep di PC kamu, Cloudflare cuma forward traffic.
+              </p>
+              <div id="install-hp-prestart">
+                <p><b>Yang perlu ada di PC:</b> <code>cloudflared</code> (gratis, <a href="#" id="cloudflared-download">download di sini</a>).</p>
+                <button id="start-tunnel" class="primary">Mulai tunnel</button>
+              </div>
+              <div id="install-hp-starting" class="hidden">
+                <p class="muted">Menunggu tunnel siap…</p>
+                <div class="spinner" aria-hidden="true"></div>
+              </div>
+              <div id="install-hp-running" class="hidden">
+                <p class="muted">Tunnel aktif. Buka URL ini di HP:</p>
+                <code id="tunnel-url" class="tunnel-url"></code>
+                <img id="tunnel-qr" alt="QR URL tunnel" />
+                <p class="muted">Di HP → Chrome <b>Menu &gt; Install app</b> (atau "Add to Home Screen" di Safari).</p>
+                <div class="actions">
+                  <button id="copy-tunnel-url" class="ghost">Copy URL</button>
+                  <button id="stop-tunnel" class="danger">Stop tunnel</button>
+                </div>
+              </div>
+              <div id="install-hp-error" class="hidden">
+                <p class="error" id="install-hp-error-msg"></p>
+                <div class="actions">
+                  <button id="retry-tunnel" class="primary">Coba lagi</button>
+                </div>
               </div>
             </div>
           </div>

@@ -490,6 +490,56 @@ async function startServer(options) {
     }
   });
 
+  // Web Share Target receiver — browsers that installed the PWA can send
+  // files/text here via the OS "Share to…" sheet. We drop the payload into
+  // <sharedRoot>/Shared-from-Phone/ (auto-created), then redirect back to
+  // the app with a ?shared=N marker so the frontend shows a toast.
+  const shareTargetDir = () => path.join(sharedRoot, "Shared-from-Phone");
+  const shareTargetUpload = multer({
+    storage: multer.diskStorage({
+      destination: (_req, _file, cb) => {
+        try {
+          fs.mkdirSync(shareTargetDir(), { recursive: true });
+          cb(null, shareTargetDir());
+        } catch (err) {
+          cb(err, "");
+        }
+      },
+      filename: (_req, file, cb) => {
+        // Shared-from-Phone can collide easily (every iOS photo is IMG_1234.jpg).
+        // Prefix a short timestamp to keep each share unique and ordered.
+        const stamp = new Date().toISOString().replace(/[^0-9A-Za-z]/g, "").slice(0, 14);
+        const safe = file.originalname.replace(/[/\\\0]/g, "_");
+        cb(null, `${stamp}-${safe}`);
+      },
+    }),
+    limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2 GB per shared file
+  });
+  app.post("/share-target", shareTargetUpload.array("media", 50), async (req, res, next) => {
+    try {
+      const files = req.files || [];
+      // Also save any text/url the user shared along with the files.
+      const text = [
+        req.body && req.body.title,
+        req.body && req.body.text,
+        req.body && req.body.link,
+      ].filter(Boolean).join("\n\n");
+      if (text.trim()) {
+        const stamp = new Date().toISOString().replace(/[^0-9A-Za-z]/g, "").slice(0, 14);
+        fs.mkdirSync(shareTargetDir(), { recursive: true });
+        await fsp.writeFile(path.join(shareTargetDir(), `${stamp}-shared.txt`), text);
+      }
+      if (files.length || text.trim()) {
+        broadcastEvent({ type: "files-changed", path: "Shared-from-Phone" });
+      }
+      const n = files.length + (text.trim() ? 1 : 0);
+      // 303 See Other so the browser follows with GET instead of re-POSTing.
+      res.redirect(303, `/?shared=${n}&dest=${encodeURIComponent("Shared-from-Phone")}`);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Error handler
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
