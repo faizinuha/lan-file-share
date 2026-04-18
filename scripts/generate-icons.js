@@ -17,7 +17,9 @@ const path = require("path");
 const zlib = require("zlib");
 
 const outDir = path.join(__dirname, "..", "public", "icons");
+const buildDir = path.join(__dirname, "..", "build");
 fs.mkdirSync(outDir, { recursive: true });
+fs.mkdirSync(buildDir, { recursive: true });
 
 function crc32(buf) {
   let c;
@@ -132,15 +134,28 @@ function writeIfMissing(name, buf) {
 }
 
 let wrote = 0;
-for (const size of [192, 512]) {
+const cache = new Map();
+for (const size of [192, 512, 1024]) {
   const buf = drawIcon(size);
-  if (writeIfMissing(`icon-${size}.png`, buf)) {
-    wrote++;
-    // eslint-disable-next-line no-console
-    console.log(`Generated public/icons/icon-${size}.png`);
+  cache.set(size, buf);
+  if (size !== 1024) {
+    if (writeIfMissing(`icon-${size}.png`, buf)) {
+      wrote++;
+      // eslint-disable-next-line no-console
+      console.log(`Generated public/icons/icon-${size}.png`);
+    }
   }
 }
+
+// build/icon.png is the source electron-builder uses to generate Windows .ico
+// and macOS .icns automatically. We always rewrite it so installer builds
+// pick up icon tweaks.
+const buildIconPath = path.join(buildDir, "icon.png");
+fs.writeFileSync(buildIconPath, cache.get(1024));
+// eslint-disable-next-line no-console
+console.log("Wrote build/icon.png (1024x1024)");
+
 if (wrote === 0) {
   // eslint-disable-next-line no-console
-  console.log("Icons already exist; skipping.");
+  console.log("PWA icons already exist; skipping.");
 }

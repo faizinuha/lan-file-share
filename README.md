@@ -83,6 +83,28 @@ Kedua sisi identik: sama-sama bisa lihat file device lain dan upload ke device m
 - **HP nggak perlu install** apapun dari app store — cukup buka URL lalu "Add to Home Screen" di Chrome/Safari.
 - **Real-time**: WebSocket kasih tahu device lain pas ada file baru / rename / delete → UI auto-refresh.
 
+## Install (prebuilt)
+
+Cara paling gampang: download installer untuk OS kamu dari halaman [Releases](https://github.com/faizinuha/lan-file-share/releases/latest) dan install seperti aplikasi biasa. Setelah install, app muncul:
+
+- **Windows**: Start Menu → "LAN File Share" (+ shortcut desktop, + entry di Add/Remove Programs untuk uninstall).
+- **macOS**: Applications → "LAN File Share" (Launchpad, Spotlight).
+- **Linux (.deb / Debian / Ubuntu)**: `sudo dpkg -i lan-file-share_*.deb` — muncul di Activities / Applications menu (kategori Network / File Transfer).
+- **Linux (.AppImage)**: `chmod +x 'LAN File Share-*.AppImage' && ./'LAN File Share-*.AppImage'` — portable, 1 file.
+
+File yang tersedia per release:
+
+| OS | File |
+|---|---|
+| Windows x64 (installer) | `LAN File Share Setup 0.1.0.exe` |
+| Windows x64 (portable) | `LAN File Share 0.1.0.exe` |
+| macOS (Intel + Apple Silicon, DMG) | `LAN File Share-0.1.0.dmg`, `-arm64.dmg` |
+| macOS (zip) | `LAN File Share-0.1.0-mac.zip` |
+| Linux x64 (AppImage) | `LAN File Share-0.1.0.AppImage` |
+| Linux x64 (Debian/Ubuntu) | `lan-file-share_0.1.0_amd64.deb` |
+
+> Pertama kali jalan di Windows, **Microsoft SmartScreen** bisa warn ("Windows protected your PC") karena installer belum signed. Klik **More info → Run anyway**. Masalah yang sama di macOS Gatekeeper untuk DMG: buka System Settings → Privacy & Security → Open Anyway.
+
 ## Jalankan di PC (Electron)
 
 ### Prasyarat
@@ -111,6 +133,32 @@ Lalu:
 - Isi nama device (misal `PC-Faiz`) → klik Masuk.
 - Klik tombol **QR** di pojok kanan atas → screen tampilin QR code & URL (contoh `http://192.168.1.5:5000`).
 - Dari HP, scan QR-nya atau ketik URL manual.
+
+### Build installer sendiri
+
+```bash
+npm run dist          # Build untuk OS saat ini
+npm run dist:win      # Windows (.exe NSIS installer + portable)
+npm run dist:mac      # macOS (.dmg universal x64 + arm64 + .zip)
+npm run dist:linux    # Linux (.AppImage + .deb)
+npm run pack          # Hanya unpacked folder, tanpa bikin installer (cepat, buat debug)
+```
+
+Hasil masuk ke `dist/`. Config ada di `package.json` pada field `build` (electron-builder). Untuk build macOS code-signed kamu butuh Apple Developer ID + set env `CSC_LINK` / `CSC_KEY_PASSWORD`; untuk Windows Authenticode set `CSC_LINK` pointing ke `.pfx`.
+
+### Release otomatis via GitHub Actions
+
+Tag commit dengan format `vX.Y.Z`:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Workflow [`.github/workflows/release.yml`](.github/workflows/release.yml) akan:
+
+1. Build installer di `ubuntu-latest`, `macos-latest`, `windows-latest` secara paralel.
+2. Upload tiap artifact ke GitHub Release (draft) dengan release notes auto-generated.
+3. Kamu tinggal publish draft-nya biar user bisa download.
 
 ### Ganti folder shared
 
@@ -475,7 +523,7 @@ GitHub Actions (`.github/workflows/ci.yml`) jalanin:
 - [ ] **HTTPS self-signed** + instalasi CA cert (biar service worker & Camera API jalan di LAN)
 - [ ] **mDNS / Bonjour discovery** biar nggak perlu ketik IP
 - [ ] **Zip selected files** → download sebagai 1 archive
-- [ ] **Build installer** Electron via electron-builder (`.dmg`, `.exe`, `AppImage`)
+- [x] **Build installer** Electron via electron-builder (`.dmg`, `.exe`, `AppImage`, `.deb`) (done)
 - [ ] **Per-device private folder** (read/write isolation)
 - [ ] **Resume / chunked upload** untuk file sangat besar
 - [ ] **Transfer langsung peer-to-peer** via WebRTC (HP → HP tanpa lewat server)
