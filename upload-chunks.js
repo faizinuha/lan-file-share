@@ -180,7 +180,11 @@ function createChunkUploadHandler(opts) {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[upload-chunk] error:", err);
-      return res.status(500).json({ error: err && err.message ? err.message : String(err) });
+      // Respect err.status when set (e.g. resolveSafe tags path-traversal
+      // with status=400). Only fall back to 500 for truly unexpected
+      // errors, matching the global Express error handler in server.js.
+      const status = err && Number.isInteger(err.status) ? err.status : 500;
+      return res.status(status).json({ error: err && err.message ? err.message : String(err) });
     }
   };
 }

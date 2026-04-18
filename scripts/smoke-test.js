@@ -244,7 +244,10 @@ async function main() {
       "x",
       "application/octet-stream"
     );
-    check("chunked upload rejects path traversal", badChunk.status >= 400);
+    check(
+      "chunked upload rejects path traversal with 400 (not 500)",
+      badChunk.status === 400
+    );
   } finally {
     await server.close();
     try {
