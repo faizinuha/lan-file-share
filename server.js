@@ -101,36 +101,66 @@ async function saveDirMeta(absDir, data) {
   await fsp.rename(tmp, p);
 }
 
-async function setFileMeta(absDir, filename, info) {
-  const data = await loadDirMeta(absDir);
-  data.files[filename] = info;
-  await saveDirMeta(absDir, data);
+// Per-directory mutex. All meta mutators are read-modify-write on the same
+// sidecar; without serialization, two concurrent uploads to the same dir
+// would interleave at the `await loadDirMeta()` boundary and the second
+// writer would clobber the first's entry (see Devin Review on #11).
+//
+// In-memory is sufficient: meta writes only originate from this Node
+// process. A Map<absDir, Promise> chains each request onto the previous
+// one for that dir; unrelated dirs stay parallel.
+const dirMetaLocks = new Map();
+function withDirMetaLock(absDir, fn) {
+  const prev = dirMetaLocks.get(absDir) || Promise.resolve();
+  // Swallow prev errors so one failed write doesn't poison the queue.
+  const next = prev.catch(() => {}).then(fn);
+  dirMetaLocks.set(absDir, next);
+  // Best-effort cleanup so the map doesn't leak one entry per ever-touched
+  // directory. Checking identity guards against replacing a newer lock.
+  next.finally(() => {
+    if (dirMetaLocks.get(absDir) === next) dirMetaLocks.delete(absDir);
+  }).catch(() => {});
+  return next;
 }
 
-async function setManyFileMeta(absDir, entries) {
-  if (!entries || entries.length === 0) return;
-  const data = await loadDirMeta(absDir);
-  for (const [filename, info] of entries) {
+function setFileMeta(absDir, filename, info) {
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
     data.files[filename] = info;
-  }
-  await saveDirMeta(absDir, data);
+    await saveDirMeta(absDir, data);
+  });
 }
 
-async function renameFileMeta(absDir, oldName, newName) {
-  const data = await loadDirMeta(absDir);
-  if (data.files[oldName]) {
-    data.files[newName] = data.files[oldName];
-    delete data.files[oldName];
+function setManyFileMeta(absDir, entries) {
+  if (!entries || entries.length === 0) return Promise.resolve();
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
+    for (const [filename, info] of entries) {
+      data.files[filename] = info;
+    }
     await saveDirMeta(absDir, data);
-  }
+  });
 }
 
-async function removeFileMeta(absDir, name) {
-  const data = await loadDirMeta(absDir);
-  if (data.files[name]) {
-    delete data.files[name];
-    await saveDirMeta(absDir, data);
-  }
+function renameFileMeta(absDir, oldName, newName) {
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
+    if (data.files[oldName]) {
+      data.files[newName] = data.files[oldName];
+      delete data.files[oldName];
+      await saveDirMeta(absDir, data);
+    }
+  });
+}
+
+function removeFileMeta(absDir, name) {
+  return withDirMetaLock(absDir, async () => {
+    const data = await loadDirMeta(absDir);
+    if (data.files[name]) {
+      delete data.files[name];
+      await saveDirMeta(absDir, data);
+    }
+  });
 }
 
 // Extract uploader identity from request headers. Both the small and
