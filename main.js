@@ -330,10 +330,15 @@ async function startTunnel() {
 
     proc.on("exit", (code) => {
       const url = tunnelState.url;
-      tunnelState.proc = null;
-      tunnelState.url = null;
-      tunnelState.starting = false;
-      sendTunnelEvent({ type: "exit", code, url });
+      // Only reset shared state if *this* process is still the active one.
+      // Otherwise a SIGTERM'd proc1 firing exit after a new startTunnel()
+      // would overwrite tunnelState.proc (now proc2) to null and orphan it.
+      if (tunnelState.proc === proc) {
+        tunnelState.proc = null;
+        tunnelState.url = null;
+        tunnelState.starting = false;
+        sendTunnelEvent({ type: "exit", code, url });
+      }
       if (!settled) {
         finish({ ok: false, error: `cloudflared keluar (code ${code}) sebelum URL muncul` });
       }

@@ -1060,7 +1060,15 @@ function wireInstallHp() {
   if (lf && lf.onTunnelEvent) {
     lf.onTunnelEvent((evt) => {
       if (!evt) return;
-      if (evt.type === "ready" && evt.url) {
+      if (evt.type === "open-modal") {
+        // Tray menu "Install ke HP" → open modal from main process.
+        show(modal);
+        if (state.tunnel.running && state.tunnel.url) {
+          showRunning(state.tunnel.url);
+        } else {
+          showPrestart();
+        }
+      } else if (evt.type === "ready" && evt.url) {
         state.tunnel = { running: true, url: evt.url };
         showRunning(evt.url);
       } else if (evt.type === "exit") {
