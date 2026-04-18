@@ -7,6 +7,23 @@ const state = {
   ws: null,
   pingTimer: null,
   searchTimer: null,
+  // Upload preferences (can be tweaked from the UI).
+  uploadPrefs: {
+    autoResizeImages: true,
+    maxImageDim: 2048,
+    jpegQuality: 0.85,
+    // Files larger than this are uploaded in 4 MB chunks so the browser
+    // never needs to hold the whole file in RAM (critical on low-memory HPs).
+    chunkThreshold: 8 * 1024 * 1024,
+    chunkSize: 4 * 1024 * 1024,
+    maxRetries: 3,
+  },
+  update: {
+    latest: null,
+    hasUpdate: false,
+    downloading: false,
+    downloaded: false,
+  },
 };
 
 const els = {};
@@ -33,8 +50,8 @@ function toast(message, kind = "") {
   setTimeout(() => t.remove(), 2800);
 }
 
-function show(el) { el.classList.remove("hidden"); }
-function hide(el) { el.classList.add("hidden"); }
+function show(el) { if (el) el.classList.remove("hidden"); }
+function hide(el) { if (el) el.classList.add("hidden"); }
 
 function loadMe() {
   try {
@@ -51,6 +68,20 @@ function saveMe(me) {
 
 function clearMe() {
   localStorage.removeItem("lfs-me");
+}
+
+function loadUploadPrefs() {
+  try {
+    const raw = localStorage.getItem("lfs-upload-prefs");
+    if (!raw) return;
+    Object.assign(state.uploadPrefs, JSON.parse(raw));
+  } catch (_err) { /* ignore */ }
+}
+
+function saveUploadPrefs() {
+  try {
+    localStorage.setItem("lfs-upload-prefs", JSON.stringify(state.uploadPrefs));
+  } catch (_err) { /* ignore */ }
 }
 
 async function api(url, options = {}) {
@@ -106,9 +137,10 @@ async function enterApp() {
   openWebSocket();
   startPinging();
   setupPwaSync();
-  // Show Electron-only controls
   if (window.lanFileShare && window.lanFileShare.isElectronHost) {
     show($("pick-folder"));
+    show($("check-update"));
+    wireUpdateListener();
   }
 }
 
@@ -146,7 +178,6 @@ function openWebSocket() {
           state.devices = msg.devices;
           renderDevices();
         } else if (msg.type === "files-changed") {
-          // refresh if we're in that folder or a parent
           loadFiles(state.currentPath).catch(() => { /* ignore */ });
         }
       } catch (_err) { /* ignore */ }
@@ -163,7 +194,6 @@ function startPinging() {
     try {
       await api(`/api/devices/${encodeURIComponent(state.me.id)}/ping`, { method: "POST" });
     } catch (_err) {
-      // if server restarted & forgot us, re-register silently
       try {
         const { device } = await api("/api/devices/register", {
           method: "POST",
@@ -254,14 +284,14 @@ async function loadFiles(relPath) {
 }
 
 function fileIcon(entry) {
-  if (entry.isDirectory) return "📁";
+  if (entry.isDirectory) return "F";
   const m = entry.mime || "";
-  if (m.startsWith("image/")) return "🖼️";
-  if (m.startsWith("video/")) return "🎞️";
-  if (m.startsWith("audio/")) return "🎵";
-  if (m.startsWith("text/")) return "📄";
-  if (m.includes("pdf")) return "📕";
-  return "📦";
+  if (m.startsWith("image/")) return "I";
+  if (m.startsWith("video/")) return "V";
+  if (m.startsWith("audio/")) return "A";
+  if (m.startsWith("text/")) return "T";
+  if (m.includes("pdf")) return "P";
+  return "?";
 }
 
 function renderFileList(entries) {
@@ -438,19 +468,235 @@ function deleteEntry(entry) {
   });
 }
 
-function uploadFiles(files) {
+// ======================================================================
+// Uploads
+// ======================================================================
+//
+// Low-memory phones fail large photo uploads for three reasons: the camera
+// JPEG is huge (5-20 MB), the browser tries to buffer the whole multipart
+// body in RAM, and a single dropped TCP packet kills the whole transfer.
+//
+//   1. If the file is an image and auto-resize is on, we draw it to a
+//      <canvas> and re-encode at a sensible size (default 2048px, 85%
+//      JPEG). Usually shrinks a 5 MB phone photo to ~300 KB.
+//   2. For any file above `chunkThreshold` (default 8 MB) we switch from
+//      multipart form-data to our own /api/files/upload-chunk endpoint.
+//      File.slice() returns a lightweight Blob reference, not a copy, so
+//      RAM stays flat.
+//   3. Every chunk (and every non-chunked upload) is wrapped in a retry
+//      with exponential backoff, so transient drops don't abort transfers.
+
+async function resizeImageIfNeeded(file) {
+  const prefs = state.uploadPrefs;
+  if (!prefs.autoResizeImages) return file;
+  if (!file.type || !file.type.startsWith("image/")) return file;
+  if (file.type === "image/gif" || file.type === "image/svg+xml") return file;
+  if (file.size < 500 * 1024) return file;
+  try {
+    const bitmap = typeof createImageBitmap === "function"
+      ? await createImageBitmap(file)
+      : await loadImageFallback(file);
+    const origW = bitmap.width || bitmap.naturalWidth || 0;
+    const origH = bitmap.height || bitmap.naturalHeight || 0;
+    if (!origW || !origH) return file;
+    const max = prefs.maxImageDim;
+    const scale = Math.min(1, max / Math.max(origW, origH));
+    const w = Math.round(origW * scale);
+    const h = Math.round(origH * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    if (bitmap.close) bitmap.close();
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", prefs.jpegQuality)
+    );
+    if (!blob || blob.size >= file.size) return file;
+    const newName = file.name.replace(/\.[^.]+$/, "") + ".jpg";
+    return new File([blob], newName, { type: "image/jpeg", lastModified: Date.now() });
+  } catch (err) {
+    console.warn("resize failed, uploading original:", err);
+    return file;
+  }
+}
+
+function loadImageFallback(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function withRetry(fn, { maxRetries, label }) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      attempt += 1;
+      if (attempt > maxRetries) throw err;
+      const backoff = Math.min(8000, 500 * Math.pow(2, attempt - 1));
+      console.warn(`[${label}] attempt ${attempt} failed:`, err.message || err, `retrying in ${backoff}ms`);
+      await sleep(backoff);
+    }
+  }
+}
+
+function updateUploadQueueUI() {
+  const panel = $("upload-panel");
+  const list = $("upload-list");
+  if (!panel || !list) return;
+  if (list.children.length === 0) hide(panel); else show(panel);
+}
+
+function addUploadItem(name, size) {
+  const list = $("upload-list");
+  if (!list) return { setProgress: () => {}, setStatus: () => {}, remove: () => {} };
+  const row = document.createElement("div");
+  row.className = "upload-item";
+  row.innerHTML = `
+    <div class="upload-head">
+      <span class="upload-name"></span>
+      <span class="upload-size"></span>
+    </div>
+    <div class="upload-bar"><div class="upload-fill"></div></div>
+    <div class="upload-status muted">Menyiapkan...</div>
+  `;
+  row.querySelector(".upload-name").textContent = name;
+  row.querySelector(".upload-size").textContent = humanSize(size);
+  list.appendChild(row);
+  updateUploadQueueUI();
+  const fill = row.querySelector(".upload-fill");
+  const status = row.querySelector(".upload-status");
+  return {
+    setProgress(pct) { fill.style.width = Math.max(0, Math.min(100, pct)) + "%"; },
+    setStatus(text, kind) {
+      status.textContent = text;
+      status.className = "upload-status" + (kind ? " " + kind : " muted");
+    },
+    remove() {
+      setTimeout(() => { row.remove(); updateUploadQueueUI(); }, 1500);
+    },
+  };
+}
+
+async function uploadOneSmall(file, targetPath, ui) {
+  const url = `/api/files/upload?path=${encodeURIComponent(targetPath)}`;
+  const prefs = state.uploadPrefs;
+  await withRetry(async (attempt) => {
+    if (attempt > 0) ui.setStatus(`Retry ${attempt}...`);
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url, true);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) ui.setProgress((e.loaded / e.total) * 100);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`HTTP ${xhr.status}: ${xhr.statusText || "upload failed"}`));
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timeout"));
+      const fd = new FormData();
+      fd.append("files", file, file.name);
+      xhr.send(fd);
+    });
+  }, { maxRetries: prefs.maxRetries, label: `upload ${file.name}` });
+}
+
+async function uploadOneChunked(file, targetPath, ui) {
+  const prefs = state.uploadPrefs;
+  const chunkSize = prefs.chunkSize;
+  const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+  const sessionId = (crypto.randomUUID && crypto.randomUUID().replace(/-/g, "")) ||
+    (Date.now().toString(36) + Math.random().toString(36).slice(2));
+  let sent = 0;
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * chunkSize;
+    const end = Math.min(file.size, start + chunkSize);
+    const blob = file.slice(start, end);
+    const url = `/api/files/upload-chunk?sessionId=${encodeURIComponent(sessionId)}` +
+      `&chunkIndex=${i}&totalChunks=${totalChunks}` +
+      `&fileName=${encodeURIComponent(file.name)}` +
+      `&targetPath=${encodeURIComponent(targetPath)}`;
+
+    // eslint-disable-next-line no-await-in-loop
+    await withRetry(async (attempt) => {
+      if (attempt > 0) ui.setStatus(`Retry chunk ${i + 1}/${totalChunks} (attempt ${attempt})...`);
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url, true);
+        xhr.setRequestHeader("Content-Type", "application/octet-stream");
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const localFraction = e.loaded / e.total;
+            const overall = (sent + localFraction * blob.size) / file.size;
+            ui.setProgress(overall * 100);
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText || xhr.statusText || "chunk failed"}`));
+        };
+        xhr.onerror = () => reject(new Error("network error"));
+        xhr.ontimeout = () => reject(new Error("timeout"));
+        xhr.send(blob);
+      });
+    }, { maxRetries: prefs.maxRetries, label: `chunk ${i + 1}/${totalChunks} ${file.name}` });
+
+    sent += blob.size;
+    ui.setProgress((sent / file.size) * 100);
+    ui.setStatus(`Chunk ${i + 1}/${totalChunks} terkirim`);
+  }
+  ui.setProgress(100);
+}
+
+async function uploadFiles(files) {
   if (!files || files.length === 0) return;
-  const fd = new FormData();
-  for (const f of files) fd.append("files", f, f.name);
-  const url = `/api/files/upload?path=${encodeURIComponent(state.currentPath)}`;
-  fetch(url, { method: "POST", body: fd })
-    .then((r) => r.json().then((j) => ({ r, j })))
-    .then(({ r, j }) => {
-      if (!r.ok) throw new Error((j && j.error) || "upload failed");
-      toast(`Upload ${j.uploaded.length} file`, "ok");
-      loadFiles(state.currentPath);
-    })
-    .catch((err) => toast("Upload gagal: " + err.message, "error"));
+  const targetPath = state.currentPath;
+  const prefs = state.uploadPrefs;
+  for (const original of files) {
+    // eslint-disable-next-line no-await-in-loop
+    await uploadOneWithUI(original, targetPath, prefs);
+  }
+  loadFiles(state.currentPath).catch(() => { /* ignore */ });
+}
+
+async function uploadOneWithUI(original, targetPath, prefs) {
+  const ui = addUploadItem(original.name, original.size);
+  try {
+    ui.setStatus("Memproses...");
+    let file = original;
+    if (prefs.autoResizeImages && original.type && original.type.startsWith("image/")) {
+      file = await resizeImageIfNeeded(original);
+      if (file !== original) {
+        ui.setStatus(`Foto di-resize ${humanSize(original.size)} -> ${humanSize(file.size)}`);
+      }
+    }
+    if (file.size > prefs.chunkThreshold) {
+      ui.setStatus(`Mengirim ${Math.ceil(file.size / prefs.chunkSize)} chunk...`);
+      await uploadOneChunked(file, targetPath, ui);
+    } else {
+      ui.setStatus("Mengunggah...");
+      await uploadOneSmall(file, targetPath, ui);
+    }
+    ui.setProgress(100);
+    ui.setStatus("Selesai", "ok");
+    toast(`Upload: ${file.name}`, "ok");
+  } catch (err) {
+    ui.setStatus("Gagal: " + (err.message || err), "error");
+    toast("Upload gagal: " + (err.message || err), "error");
+  } finally {
+    ui.remove();
+  }
 }
 
 function promptMkdir() {
@@ -541,6 +787,110 @@ function setupPwaSync() {
   }
 }
 
+// ======================================================================
+// Auto-update (Electron-only)
+// ======================================================================
+
+function wireUpdateListener() {
+  if (!(window.lanFileShare && window.lanFileShare.onUpdateEvent)) return;
+  window.lanFileShare.onUpdateEvent((evt) => {
+    if (!evt || !evt.type) return;
+    const modal = $("update-modal");
+    const status = $("update-status");
+    const progress = $("update-progress");
+    const fill = $("update-progress-fill");
+    const installBtn = $("update-install");
+    const downloadBtn = $("update-download");
+    switch (evt.type) {
+      case "checking":
+        setText(status, "Mengecek update...");
+        break;
+      case "available":
+        state.update.latest = evt.version;
+        state.update.hasUpdate = true;
+        setText(status, `Versi baru tersedia: v${evt.version}`);
+        setText($("update-version"), `v${evt.version}`);
+        show(modal);
+        show(downloadBtn);
+        hide(installBtn);
+        hide(progress);
+        toast(`Update v${evt.version} tersedia`, "ok");
+        break;
+      case "not-available":
+        setText(status, "Sudah versi terbaru.");
+        break;
+      case "progress": {
+        state.update.downloading = true;
+        const pct = Math.round(evt.percent || 0);
+        show(progress);
+        fill.style.width = pct + "%";
+        setText(status, `Download ${pct}% (${humanSize(evt.transferred)} / ${humanSize(evt.total)})`);
+        break;
+      }
+      case "downloaded":
+        state.update.downloading = false;
+        state.update.downloaded = true;
+        setText(status, `Update v${evt.version} siap diinstall.`);
+        hide(downloadBtn);
+        show(installBtn);
+        toast("Update siap - klik Install sekarang.", "ok");
+        break;
+      case "error":
+        setText(status, "Gagal: " + (evt.message || "unknown"));
+        break;
+      default:
+        break;
+    }
+  });
+}
+
+async function manualCheckUpdate() {
+  if (!(window.lanFileShare && window.lanFileShare.checkForUpdate)) {
+    toast("Cek update cuma tersedia di app desktop.", "error");
+    return;
+  }
+  toast("Mengecek update...");
+  try {
+    const result = await window.lanFileShare.checkForUpdate();
+    if (!result) return;
+    if (!result.supported) {
+      toast("Updater nggak aktif di build dev.", "error");
+      return;
+    }
+    if (result.error) {
+      toast("Gagal cek: " + result.error, "error");
+      return;
+    }
+    if (result.hasUpdate) {
+      setText($("update-version"), `v${result.latestVersion}`);
+      show($("update-modal"));
+    } else {
+      toast(`Sudah versi terbaru (v${result.currentVersion}).`, "ok");
+    }
+  } catch (err) {
+    toast("Gagal cek: " + err.message, "error");
+  }
+}
+
+async function startUpdateDownload() {
+  if (!(window.lanFileShare && window.lanFileShare.downloadUpdate)) return;
+  try {
+    const res = await window.lanFileShare.downloadUpdate();
+    if (res && res.error) toast("Download gagal: " + res.error, "error");
+  } catch (err) {
+    toast("Download gagal: " + err.message, "error");
+  }
+}
+
+async function installUpdateNow() {
+  if (!(window.lanFileShare && window.lanFileShare.installUpdate)) return;
+  try {
+    await window.lanFileShare.installUpdate();
+  } catch (err) {
+    toast("Install gagal: " + err.message, "error");
+  }
+}
+
 function wireUp() {
   els.registerBtn = $("register-btn");
   els.registerBtn.addEventListener("click", registerDevice);
@@ -558,6 +908,23 @@ function wireUp() {
       toast("Folder diganti. Restart aplikasi buat terapin.", "ok");
     }
   });
+
+  const checkUpdateBtn = $("check-update");
+  if (checkUpdateBtn) checkUpdateBtn.addEventListener("click", manualCheckUpdate);
+  const downloadBtn = $("update-download");
+  if (downloadBtn) downloadBtn.addEventListener("click", startUpdateDownload);
+  const installBtn = $("update-install");
+  if (installBtn) installBtn.addEventListener("click", installUpdateNow);
+
+  const resizeToggle = $("toggle-resize");
+  if (resizeToggle) {
+    resizeToggle.checked = state.uploadPrefs.autoResizeImages;
+    resizeToggle.addEventListener("change", () => {
+      state.uploadPrefs.autoResizeImages = resizeToggle.checked;
+      saveUploadPrefs();
+      toast(resizeToggle.checked ? "Auto-resize foto: ON" : "Auto-resize foto: OFF", "ok");
+    });
+  }
 
   $("btn-upload").addEventListener("click", () => $("file-input").click());
   $("file-input").addEventListener("change", (e) => {
@@ -596,7 +963,6 @@ function wireUp() {
     if (e.key === "Escape") document.querySelectorAll(".modal").forEach(hide);
   });
 
-  // Drag & drop upload
   const content = document.querySelector(".content");
   if (content) {
     ["dragenter", "dragover"].forEach((ev) => content.addEventListener(ev, (e) => { e.preventDefault(); }));
@@ -608,6 +974,7 @@ function wireUp() {
 }
 
 async function init() {
+  loadUploadPrefs();
   wireUp();
   const saved = loadMe();
   if (saved) {
@@ -615,7 +982,6 @@ async function init() {
     try {
       await api(`/api/devices/${encodeURIComponent(saved.id)}/ping`, { method: "POST" });
     } catch (_err) {
-      // server doesn't know us anymore — re-register
       try {
         const { device } = await api("/api/devices/register", {
           method: "POST",

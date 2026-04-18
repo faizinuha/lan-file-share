@@ -245,3 +245,31 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1p
 }
 .toast.error { border-color: var(--danger); }
 .toast.ok { border-color: var(--ok); }
+
+/* ============ Upload panel + progress ============ */
+.toggle-inline { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); cursor: pointer; padding: 6px 10px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 8px; }
+.toggle-inline input { accent-color: var(--accent); }
+
+.upload-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.upload-panel h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.upload-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.upload-item:last-child { border-bottom: 0; }
+.upload-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; margin-bottom: 4px; }
+.upload-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-size { color: var(--muted); font-size: 12px; }
+.upload-bar { height: 6px; background: var(--bg-alt); border-radius: 4px; overflow: hidden; }
+.upload-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.2s ease; }
+.upload-status { font-size: 12px; margin-top: 4px; }
+.upload-status.ok { color: var(--ok); }
+.upload-status.error { color: var(--danger); }
+
+/* ============ Update modal body ============ */
+.update-body { padding: 16px; }
+.update-body .upload-bar { margin: 10px 0; }
+.update-body .actions { margin-top: 14px; }
