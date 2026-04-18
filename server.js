@@ -12,6 +12,7 @@ const multer = require("multer");
 const { WebSocketServer } = require("ws");
 const QRCode = require("qrcode");
 const { nanoid } = require("nanoid");
+const { createWebdavHandler } = require("./webdav");
 
 function getLanAddresses() {
   const interfaces = os.networkInterfaces();
@@ -173,6 +174,15 @@ async function startServer(options) {
   }
 
   // --- Middleware ---
+
+  // WebDAV endpoint so native file explorers (Windows, macOS Finder, iOS
+  // Files, Android file managers) can mount the shared folder as a drive.
+  // Mount *before* the JSON body parser doesn't help — PUT uploads must
+  // remain raw streams, so we only json-parse /api/* routes below.
+  app.use("/webdav", createWebdavHandler({
+    root: sharedRoot,
+    onChange: (dirRel) => broadcastEvent({ type: "files-changed", path: dirRel || "" }),
+  }));
 
   // Static PWA frontend
   app.use(express.static(path.join(__dirname, "public"), {

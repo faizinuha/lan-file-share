@@ -25,6 +25,34 @@ function check(name, ok, details) {
   else failed++;
 }
 
+function rawRequest(method, urlPath, body, contentType, extraHeaders) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? Buffer.from(body) : Buffer.alloc(0);
+    const opts = {
+      hostname: "127.0.0.1",
+      port: PORT,
+      method,
+      path: urlPath,
+      headers: {
+        "Content-Type": contentType || "application/octet-stream",
+        "Content-Length": payload.length,
+        ...(extraHeaders || {}),
+      },
+    };
+    const req = http.request(opts, (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        resolve({ status: res.statusCode, raw: data, headers: res.headers });
+      });
+    });
+    req.on("error", reject);
+    if (payload.length) req.write(payload);
+    req.end();
+  });
+}
+
 function request(method, urlPath, body, extraHeaders) {
   return new Promise((resolve, reject) => {
     const opts = {
@@ -155,6 +183,32 @@ async function main() {
 
     const traversal = await request("GET", "/api/files?path=..%2F..%2Fetc");
     check("path traversal is blocked", traversal.status === 400);
+
+    // WebDAV smoke tests
+    const davOptions = await request("OPTIONS", "/webdav/");
+    check("WebDAV OPTIONS advertises DAV", davOptions.status === 200);
+
+    const davPut = await rawRequest("PUT", "/webdav/uploads/dav.txt", "webdav content\n", "text/plain");
+    check("WebDAV PUT creates file", davPut.status === 201 || davPut.status === 204);
+
+    const davGet = await request("GET", "/webdav/uploads/dav.txt");
+    check("WebDAV GET returns file", davGet.status === 200 && davGet.raw.includes("webdav content"));
+
+    const davPropfind = await rawRequest("PROPFIND", "/webdav/uploads/", "", "application/xml", { Depth: "1" });
+    check("WebDAV PROPFIND lists folder",
+      davPropfind.status === 207 && davPropfind.raw.includes("dav.txt"));
+
+    const davMkcol = await rawRequest("MKCOL", "/webdav/uploads/dav-folder/", "", "application/xml");
+    check("WebDAV MKCOL creates folder", davMkcol.status === 201);
+
+    const davMove = await rawRequest("MOVE", "/webdav/uploads/dav.txt", "", "application/xml", {
+      Destination: `http://127.0.0.1:${PORT}/webdav/uploads/dav-moved.txt`,
+      Overwrite: "T",
+    });
+    check("WebDAV MOVE renames file", davMove.status === 201 || davMove.status === 204);
+
+    const davDelete = await rawRequest("DELETE", "/webdav/uploads/dav-moved.txt", "", "application/xml");
+    check("WebDAV DELETE removes file", davDelete.status === 204);
   } finally {
     await server.close();
     try {

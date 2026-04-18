@@ -53,6 +53,7 @@ Kedua sisi identik: sama-sama bisa lihat file device lain dan upload ke device m
 - **QR code** — di PC ada tombol QR yang tampilin alamat server, tinggal scan dari HP.
 - **PWA** — HP bisa "Add to Home Screen" sebagai aplikasi standalone. Offline shell.
 - **Proteksi path traversal** — semua akses file dibatasi di `sharedRoot`.
+- **WebDAV** di `/webdav` — mount folder shared sebagai drive network di Windows Explorer, macOS Finder, iOS Files, atau file manager Android. File muncul langsung di file explorer native tanpa buka aplikasi.
 
 ## Cara kerja
 
@@ -124,6 +125,57 @@ Di Electron window, klik tombol **Pilih folder** → pilih folder yang mau kamu 
    - **Android (Chrome)**: menu (⋮) → **Add to Home screen** / **Install app**.
    - **iOS (Safari)**: tombol Share → **Add to Home Screen**.
 5. Ikon aplikasi muncul di home screen. Klik → app kebuka fullscreen, tanpa address bar, tampil seperti aplikasi native.
+
+## Muncul di file explorer native (WebDAV)
+
+Selain pakai UI Electron / PWA, kamu bisa mount folder shared langsung sebagai **network drive** lewat protokol WebDAV di endpoint `/webdav`. Hasilnya file muncul persis di "My Files" / Finder / Explorer tanpa perlu buka aplikasi.
+
+> Port & host yang dipakai di contoh: `http://192.168.1.5:5000` — ganti sesuai alamat PC kamu (lihat QR code / status di app).
+
+### Windows 10 / 11
+
+Registry patch (sekali saja — biar Windows bisa connect HTTP tanpa HTTPS):
+
+1. Buka **regedit** → `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters`
+2. Set **`BasicAuthLevel`** = `2` dan **`FileSizeLimitInBytes`** = `ffffffff` (hex).
+3. Restart service **WebClient** (`net stop webclient && net start webclient`).
+
+Lalu:
+
+- Buka **This PC** → **Map network drive**
+- Folder: `\\192.168.1.5@5000\webdav\` (perhatikan `@5000` untuk port non-default)
+- Atau via Explorer address bar: `http://192.168.1.5:5000/webdav/`
+
+### macOS (Finder)
+
+- **Finder** → menu **Go** → **Connect to Server** (⌘K)
+- URL: `http://192.168.1.5:5000/webdav/`
+- Connect sebagai **Guest** (app ini memang tanpa auth di LAN).
+- Mount muncul di sidebar Finder; drag & drop langsung ke sini.
+
+### iOS & iPadOS (Files app bawaan)
+
+- Buka **Files** → tab **Browse** → tombol titik tiga (⋯) → **Connect to Server**
+- Server: `http://192.168.1.5:5000/webdav`
+- Connect as **Guest**
+- Mount muncul di **Shared** section Files app — bisa dibuka, upload foto langsung dari Photos ("Save to Files" → pilih server ini).
+
+### Android
+
+Android nggak punya WebDAV built-in. Gunakan salah satu file manager berikut:
+
+- **Solid Explorer** (Play Store, berbayar)
+- **Cx File Explorer** (gratis) — **+** → Remote → WebDAV
+- **RaiDrive** untuk ChromeOS
+- Server URL: `http://192.168.1.5:5000/webdav` — anonymous / guest.
+
+### Linux (GNOME Files / Dolphin)
+
+- Nautilus: **Other Locations** → ketik `dav://192.168.1.5:5000/webdav/`
+- KDE Dolphin: ketik `webdav://192.168.1.5:5000/webdav/` di address bar
+- CLI: `sudo mount -t davfs http://192.168.1.5:5000/webdav /mnt/lfs` (butuh `davfs2`)
+
+> **Catatan**: karena tanpa HTTPS, iOS Files kadang nolak connect (butuh TLS). Solusi: jalankan di belakang Cloudflare Tunnel (lihat section [Apakah bisa diakses jarak jauh?](#apakah-bisa-diakses-jarak-jauh)) yang otomatis kasih HTTPS.
 
 ## Mode server-only (tanpa Electron)
 
@@ -291,6 +343,10 @@ Body: `{ "path": "file.txt", "expiresInMinutes": 60, "maxDownloads": 3 }` → `{
 
 Public download (tanpa auth). Otomatis expired setelah `expiresAt` atau setelah `maxDownloads` terpakai.
 
+### WebDAV `/webdav/*`
+
+Full RFC 4918 subset: `OPTIONS`, `PROPFIND` (depth 0/1), `GET`, `HEAD`, `PUT`, `MKCOL`, `DELETE`, `MOVE`, `COPY`, `LOCK`, `UNLOCK`, `PROPPATCH`. Tidak ada auth — tutup dengan reverse proxy sebelum expose keluar LAN.
+
 ### `WS /ws`
 
 WebSocket broadcast channel. Server → client:
@@ -321,6 +377,7 @@ Config Electron tersimpan di:
 ├── main.js                  # Electron main (BrowserWindow + IPC)
 ├── preload.js               # Preload script (contextBridge API)
 ├── server.js                # Express + WebSocket server
+├── webdav.js                # WebDAV (RFC 4918) handler mounted at /webdav
 ├── public/                  # Frontend (juga di-load Electron)
 │   ├── index.html           # Register screen + main app
 │   ├── app.js               # Client logic
@@ -422,6 +479,7 @@ GitHub Actions (`.github/workflows/ci.yml`) jalanin:
 - [ ] **Per-device private folder** (read/write isolation)
 - [ ] **Resume / chunked upload** untuk file sangat besar
 - [ ] **Transfer langsung peer-to-peer** via WebRTC (HP → HP tanpa lewat server)
+- [x] **WebDAV** — bisa mount sebagai network drive di file explorer native (done)
 
 ## Lisensi
 
