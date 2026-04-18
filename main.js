@@ -348,8 +348,12 @@ async function startTunnel() {
       }
     });
 
-    // Guard rail: if no URL is seen in 45s, abort.
+    // Guard rail: if no URL is seen in 45s, abort — but only for *this*
+    // spawn. A stale timeout from proc1 firing after the user stopped it
+    // and started proc2 would otherwise call killTunnel() on proc2 while
+    // it's still connecting (tunnelState.url is null during startup).
     setTimeout(() => {
+      if (tunnelState.proc !== proc) return;
       if (!tunnelState.url) {
         killTunnel();
         finish({ ok: false, error: "Timeout: cloudflared nggak kasih URL dalam 45 detik" });
